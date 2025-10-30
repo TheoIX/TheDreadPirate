@@ -1,0 +1,5 @@
+## Interface: 11200
+## Title: TheDreadPirate
+## Notes: Warrior Macros
+## Author: Theo
+TheDreadPirate.lua
