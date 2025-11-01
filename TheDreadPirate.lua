@@ -7,6 +7,10 @@ local useCleave = false
 local lastStanceSwap = 0
 local lastGCDAt = 0
 
+-- TheoCharge state
+local theocharge_phase = 0   -- 0=idle, 1=stance ok/charging, 2=charged(wait bloodrage), 3=done(wait reset)
+local lastChargeStart = 0
+
 -- =============================
 -- Tuning
 -- =============================
@@ -17,6 +21,7 @@ local COST_WW = 25
 local COST_EXEC = 10          -- Turtle value (consumes all remaining rage)
 local COST_CLEAVE = 20
 local COST_HS = 12
+local COST_BS = 10            -- Battle Shout
 
 -- Weaving
 local HS_BUFFER = 5             -- keep this much rage beyond the reserve floor when weaving
@@ -59,6 +64,16 @@ local function InMeleeRange()
   return IsSpellInRange("Heroic Strike", "target") == 1
 end
 
+local function InChargeRange()
+  local r = IsSpellInRange("Charge", "target")
+  return r == 1
+end
+
+local function InInterceptRange()
+  local r = IsSpellInRange("Intercept", "target")
+  return r == 1
+end
+
 local function ValidEnemyTarget()
   return UnitExists("target") and UnitCanAttack("player", "target") and not UnitIsDeadOrGhost("target")
 end
@@ -73,8 +88,12 @@ local function GCDReady()
   return (GetTime() - lastGCDAt) >= GCD_S
 end
 
+local function PlayerInCombat()
+  return UnitAffectingCombat("player") == 1
+end
+
 -- =============================
--- Stance (non‑blocking)
+-- Buff checks
 -- =============================
 local function HasBerserkerStance()
   for i = 1, 40 do
@@ -85,9 +104,37 @@ local function HasBerserkerStance()
   return false
 end
 
+local function HasBattleStance()
+  for i = 1, 40 do
+    local tex = UnitBuff("player", i)
+    if not tex then break end
+    if string.find(tex, "Battle Stance") then return true end
+  end
+  return false
+end
+
+local function HasBattleShout()
+  for i = 1, 40 do
+    local tex = UnitBuff("player", i)
+    if not tex then break end
+    if string.find(tex, "Battle Shout") then return true end
+  end
+  return false
+end
+
+-- =============================
+-- Stance (non‑blocking)
+-- =============================
 local function EnsureBerserkerStance()
   if not HasBerserkerStance() and GetTime() - lastStanceSwap > 1.0 then
     CastSpellByName("Berserker Stance")
+    lastStanceSwap = GetTime()
+  end
+end
+
+local function EnsureBattleStance()
+  if not HasBattleStance() and GetTime() - lastStanceSwap > 1.0 then
+    CastSpellByName("Battle Stance")
     lastStanceSwap = GetTime()
   end
 end
@@ -126,6 +173,13 @@ local function CastExecute()
     return true
   end
   return false
+end
+
+local function CastBattleShout()
+  if not GCDReady() then return false end
+  CastSpellByName("Battle Shout")
+  lastGCDAt = GetTime()
+  return true
 end
 
 local function CastSunder()
@@ -236,7 +290,60 @@ local function MaintainSunders()
 end
 
 -- =============================
--- Main rotation with Execute gating + swing‑timed weaving
+-- TheoCharge: Out‑of‑combat Charge path (stance handled OUTSIDE) / In‑combat Intercept
+-- =============================
+local function TheoCharge()
+  if not ValidEnemyTarget() then return end
+
+  -- hard reset when combat ends (safety; also wired via event below)
+  if not PlayerInCombat() and theocharge_phase == 3 then
+    theocharge_phase = 0
+  end
+
+  if PlayerInCombat() then
+    -- In combat: assume stance handled externally; just Intercept
+    local ready = IsSpellReady("Intercept")
+    if ready and InInterceptRange() then
+      CastSpellByName("Intercept"); SpellTargetUnit("target")
+    end
+    return
+  end
+
+  -- Out of combat: assume /theostance handled the stance; now do Charge → Bloodrage across presses
+  local chargeReady, cStart, cDur = IsSpellReady("Charge")
+
+  -- Detect if Charge went on cooldown (used successfully)
+  if cDur > 0 and cStart ~= lastChargeStart then
+    theocharge_phase = 2
+    lastChargeStart = cStart
+  end
+
+  if theocharge_phase == 0 or theocharge_phase == 1 then
+    -- Try to Charge until it actually goes on cooldown
+    if chargeReady and InChargeRange() then
+      CastSpellByName("Charge"); SpellTargetUnit("target")
+      theocharge_phase = 1
+      return
+    else
+      -- keep pressing until in range/ready; stance is managed by /theostance
+      return
+    end
+  end
+
+  if theocharge_phase == 2 then
+    -- Next press: Bloodrage
+    local brReady = IsSpellReady("Bloodrage")
+    if brReady then
+      CastSpellByName("Bloodrage")
+      theocharge_phase = 3
+    end
+    return
+  end
+  -- phase 3: path completed; will reset on combat drop or explicit event
+end
+
+-- =============================
+-- Main rotation with Execute gating + swing‑timed weaving + Battle Shout upkeep
 -- =============================
 function QuickTheoWarrior()
   if not ValidEnemyTarget() then return end
@@ -273,6 +380,13 @@ function QuickTheoWarrior()
     end
   end
 
+  -- 3.5) **Battle Shout upkeep** – safe spot: both BT and WW are on cooldown and not imminent
+  if PlayerInCombat() and rage >= COST_BS and not HasBattleShout() then
+    if (not btReady and not wwReady) and btRem > GCD_S and wwRem > GCD_S then
+      if CastBattleShout() then return end
+    end
+  end
+
   -- 4) Precise HS/Cleave weaving tied to SP_SwingTimer main‑hand swing (no GCD)
   if TryWeaveSwing(rage, btRem, wwRem) then return end
 
@@ -296,7 +410,6 @@ SlashCmdList["THEOCLEAVE"] = function()
   end
 end
 
--- Tuning at runtime
 SLASH_THEOSAFE1 = "/theosafe"       -- adjust rage buffer for weaving
 SlashCmdList["THEOSAFE"] = function(msg)
   local n = tonumber(msg)
@@ -319,4 +432,35 @@ SlashCmdList["THEOWINDOW"] = function(msg)
   end
 end
 
-DEFAULT_CHAT_FRAME:AddMessage("QuickTheoWarrior loaded! /qhtwarrior, /theocleave, /theosafe <n>, /theowindow <sec>.", 0.5, 1, 0)
+-- Stance ensure kept **outside** TheoCharge to avoid blocking the sequence
+local function TheoCharge_EnsureStance()
+  if PlayerInCombat() then
+    if not HasBerserkerStance() and (GetTime() - lastStanceSwap) > 1.0 then
+      CastSpellByName("Berserker Stance")
+      lastStanceSwap = GetTime()
+    end
+  else
+    if not HasBattleStance() and (GetTime() - lastStanceSwap) > 1.0 then
+      CastSpellByName("Battle Stance")
+      lastStanceSwap = GetTime()
+    end
+  end
+end
+
+-- Events: reset theocharge state when leaving combat
+local TheoChargeEvt = CreateFrame("Frame")
+TheoChargeEvt:RegisterEvent("PLAYER_REGEN_ENABLED")
+TheoChargeEvt:SetScript("OnEvent", function()
+  theocharge_phase = 0
+end)
+
+-- Slash: stance first, then driver
+SLASH_THEOSTANCE1 = "/theostance"
+SlashCmdList["THEOSTANCE"] = TheoCharge_EnsureStance
+
+-- New: TheoCharge macro
+SLASH_THEOCHARGE1 = "/theocharge"
+SlashCmdList["THEOCHARGE"] = TheoCharge
+
+DEFAULT_CHAT_FRAME:AddMessage("QuickTheoWarrior loaded! /qhtwarrior, /theocleave, /theosafe <n>, /theowindow <sec>, /theocharge.", 0.5, 1, 0)
+
