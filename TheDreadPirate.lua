@@ -1,14 +1,15 @@
 -- QuickTheoWarrior.lua – Rage‑smart DPS (Classic/Turtle 1.12)
--- Execute gating so BT/WW never slip; **precise HS/Cleave weaving using SP_SwingTimer**.
+-- Execute gating so BT/WW never slip; precise HS/Cleave weaving using SP_SwingTimer.
 -- HS/Cleave do NOT consume GCD, so we time them to main‑hand swing using st_timer.
 
 local BOOKTYPE_SPELL = "spell"
 local useCleave = false
 local lastStanceSwap = 0
 local lastGCDAt = 0
+local lastBSAt = 0 -- micro lockout after casting Battle Shout to avoid re-cast during aura scan delay
 
 -- TheoCharge state
-local theocharge_phase = 0   -- 0=idle, 1=stance ok/charging, 2=charged(wait bloodrage), 3=done(wait reset)
+local theocharge_phase = 0   -- 0=idle, 1=charging, 2=charged(wait bloodrage), 3=done(wait reset)
 local lastChargeStart = 0
 
 -- =============================
@@ -29,6 +30,7 @@ local IMMINENT_BT_WINDOW = 1.2  -- treat BT as imminent if ≤ this many seconds
 local IMMINENT_WW_WINDOW = 1.0  -- treat WW as imminent if ≤ this many seconds
 local SWING_QUEUE_WINDOW = 0.35 -- queue HS/Cleave if MH swing is due within this window (seconds)
 local PANIC_RAGE = 95           -- anti‑cap: force weave even if conservative checks fail
+local WW_ONCD_BT_IMMINENT_BARRIER = 0.5 -- seconds: if BT is closer than this and rage < 30, briefly hold WW
 
 -- =============================
 -- Utilities
@@ -114,16 +116,20 @@ local function HasBattleStance()
 end
 
 local function HasBattleShout()
+  -- Vanilla/Turtle 1.12: UnitBuff returns a TEXTURE path, not the localized name.
+  -- Battle Shout icon path contains "Ability_Warrior_BattleShout"; match robustly.
   for i = 1, 40 do
     local tex = UnitBuff("player", i)
     if not tex then break end
-    if string.find(tex, "Battle Shout") then return true end
+    if string.find(tex, "Ability_Warrior_BattleShout") or string.find(tex, "BattleShout") then
+      return true
+    end
   end
   return false
 end
 
 -- =============================
--- Stance (non‑blocking)
+-- Stance helpers (non‑blocking)
 -- =============================
 local function EnsureBerserkerStance()
   if not HasBerserkerStance() and GetTime() - lastStanceSwap > 1.0 then
@@ -177,8 +183,11 @@ end
 
 local function CastBattleShout()
   if not GCDReady() then return false end
+  local ready = IsSpellReady("Battle Shout")
+  if not ready then return false end
   CastSpellByName("Battle Shout")
   lastGCDAt = GetTime()
+  lastBSAt = lastGCDAt
   return true
 end
 
@@ -226,7 +235,6 @@ end
 -- =============================
 -- Rage floor & weaving using SP_SwingTimer (main‑hand swing timing)
 -- =============================
--- Minimum rage we must preserve for imminent CDs so we never starve them
 local function RageFloor(btRem, wwRem)
   if btRem <= IMMINENT_BT_WINDOW then return COST_BT end
   if wwRem <= IMMINENT_WW_WINDOW then return COST_WW end
@@ -236,14 +244,20 @@ end
 -- Decide if we can safely queue HS/Cleave to land on the **next main‑hand** swing
 local function TryWeaveSwing(rage, btRem, wwRem)
   if not ValidEnemyTarget() or not InMeleeRange() then return false end
-  -- Require SP_SwingTimer globals; fall back if missing
   if type(st_timer) ~= "number" or st_timer <= 0 then return false end
 
   local nextMH = st_timer -- seconds until main‑hand swing (from SP_SwingTimer)
-  if nextMH <= 0 or nextMH > 10 then return false end -- sanity
+  if nextMH <= 0 or nextMH > 10 then return false end
 
   -- Only queue inside a narrow pre‑swing window (user‑tunable via /theowindow)
   if nextMH > SWING_QUEUE_WINDOW and rage < PANIC_RAGE then return false end
+
+  -- If WW is ready now or extremely soon, don't weave unless we can still afford WW after HS/Cleave
+  local wwNow = IsSpellReady("Whirlwind")
+  if wwNow or wwRem <= 0.2 then
+    local pendingCost = useCleave and COST_CLEAVE or COST_HS
+    if (rage - pendingCost) < (COST_WW + HS_BUFFER) then return false end
+  end
 
   local floor = RageFloor(btRem, wwRem)
   local spellName = useCleave and "Cleave" or "Heroic Strike"
@@ -364,8 +378,12 @@ function QuickTheoWarrior()
 
   -- 2) Keep WW on cooldown when it won't jeopardize BT
   if wwReady and InMeleeRange() then
-    if (btRem > GCD_S and rage >= COST_WW) or (btRem <= GCD_S and rage >= (COST_WW + COST_BT)) then
-      if CastWhirlwind() then return end
+    local btImminent = (btRem <= WW_ONCD_BT_IMMINENT_BARRIER)
+    -- Fire WW essentially on cooldown: only hold if BT is very close AND we don't have 30 rage banked
+    if (not btImminent) or (rage >= COST_BT) then
+      if rage >= COST_WW then
+        if CastWhirlwind() then return end
+      end
     end
   end
 
@@ -380,8 +398,8 @@ function QuickTheoWarrior()
     end
   end
 
-  -- 3.5) **Battle Shout upkeep** – safe spot: both BT and WW are on cooldown and not imminent
-  if PlayerInCombat() and rage >= COST_BS and not HasBattleShout() then
+  -- 3.5) Battle Shout upkeep – safe spot: both BT and WW are on cooldown and not imminent
+  if PlayerInCombat() and rage >= COST_BS and not HasBattleShout() and (GetTime() - lastBSAt) > 0.7 then
     if (not btReady and not wwReady) and btRem > GCD_S and wwRem > GCD_S then
       if CastBattleShout() then return end
     end
@@ -462,5 +480,5 @@ SlashCmdList["THEOSTANCE"] = TheoCharge_EnsureStance
 SLASH_THEOCHARGE1 = "/theocharge"
 SlashCmdList["THEOCHARGE"] = TheoCharge
 
-DEFAULT_CHAT_FRAME:AddMessage("QuickTheoWarrior loaded! /qhtwarrior, /theocleave, /theosafe <n>, /theowindow <sec>, /theocharge.", 0.5, 1, 0)
+DEFAULT_CHAT_FRAME:AddMessage("QuickTheoWarrior loaded! /qhtwarrior, /theocleave, /theosafe <n>, /theowindow <sec>, /theostance, /theocharge.", 0.5, 1, 0)
 
