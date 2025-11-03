@@ -81,7 +81,7 @@ local function GCDReady()
 end
 
 -- =============================
--- Buff checks (string.find robust matches)
+-- Stances (1.12‑safe via shapeshift API)
 -- =============================
 local function CurrentStance()
   local n = GetNumShapeshiftForms() or 0
@@ -103,6 +103,9 @@ local function EnsureBerserkerStance()
   end
 end
 
+-- =============================
+-- Basic buff check
+-- =============================
 local function HasBattleShout()
   -- Vanilla/Turtle 1.12: UnitBuff returns a TEXTURE path, not the localized name.
   -- Battle Shout icon path contains "Ability_Warrior_BattleShout"; match robustly.
@@ -162,9 +165,8 @@ local function CastBattleShout()
   return true
 end
 
--- Optional: Sunder maintenance if assigned
+-- (legacy placeholder kept; unused after we switch to macro maintainer)
 local function MaintainSunders()
-  -- placeholder; integrate your own debuff scan if you want this
   return false
 end
 
@@ -199,6 +201,83 @@ local function IsSwingQueued()
     if IsCurrentAction(slot) then return true end
   end
   return false
+end
+
+-- =============================
+-- Early Sunder + Macro Maintenance (SuperCleveroid)
+-- =============================
+local THEO_EARLY_SUNDER = 1         -- 1 = use one immediate Sunder if target has none
+local THEO_SUNDER_MAINTAIN = 1      -- 1 = maintain with macro in safe windows
+local THEO_SUNDER_MACRO_NAME = "Sunder5"  -- name of your SuperCleveroid macro
+
+local THEO_SUNDER_MACRO_SLOT, THEO_LAST_MACRO_SCAN = nil, 0
+
+-- Simple check for presence of any Sunder debuff (icon only)
+local function HasSunderDebuff()
+  for i=1,40 do
+    local tex = UnitDebuff("target", i)
+    if not tex then break end
+    if type(tex)=="string" and string.find(string.lower(tex), "ability_warrior_sunder") then
+      return true
+    end
+  end
+  return false
+end
+
+-- Find/cached macro slot by name
+local function RefreshSunderMacroSlot(force)
+  local now = GetTime()
+  if not force and THEO_SUNDER_MACRO_SLOT and (now - THEO_LAST_MACRO_SCAN) < 1.0 then return THEO_SUNDER_MACRO_SLOT end
+  THEO_LAST_MACRO_SCAN = now
+  THEO_SUNDER_MACRO_SLOT = nil
+  for slot=1,120 do
+    local name = GetActionText(slot) -- for macros, this returns the macro's name
+    if name and name == THEO_SUNDER_MACRO_NAME then
+      THEO_SUNDER_MACRO_SLOT = slot
+      break
+    end
+  end
+  return THEO_SUNDER_MACRO_SLOT
+end
+
+local function UseSunderMacro()
+  local slot = RefreshSunderMacroSlot(false)
+  if not slot or not HasAction(slot) then return false end
+  UseAction(slot)          -- fires: /cast [debuff:"Sunder Armor"<#5] Sunder Armor
+  lastGCDAt = GetTime()    -- stamp GCD for rotation bookkeeping
+  return true
+end
+
+-- Fire ONE early Sunder on targets that have no Sunder yet (no BT/WW gating)
+local function EarlySunderIfMissing()
+  if THEO_EARLY_SUNDER ~= 1 then return false end
+  if not ValidEnemyTarget() or not InMeleeRange() or not GCDReady() then return false end
+  if HasSunderDebuff() then return false end
+  if GetRage() < 15 then return false end -- keep a small floor so we don't zero out on pull
+  CastSpellByName("Sunder Armor"); SpellTargetUnit("target")
+  lastGCDAt = GetTime()
+  return true
+end
+
+-- Maintain via macro in safe BT/WW windows (macro self-stops at 5)
+local function MaintainSundersMacro(btRem, wwRem)
+  if THEO_SUNDER_MAINTAIN ~= 1 then return false end
+  if not ValidEnemyTarget() or not InMeleeRange() or not GCDReady() then return false end
+  if btRem <= 0.4 then return false end
+  if wwRem <= 0.2 then return false end
+  return UseSunderMacro()
+end
+
+-- Optional slash to set the macro name at runtime
+SLASH_THEOSUNDERMAC1 = "/theosundermacro"
+SlashCmdList["THEOSUNDERMAC"] = function(msg)
+  if msg and msg ~= "" then
+    THEO_SUNDER_MACRO_NAME = msg
+    THEO_SUNDER_MACRO_SLOT = nil
+    DEFAULT_CHAT_FRAME:AddMessage("Theo: Sunder macro set to '"..msg.."'. Place it on any bar.", 0.8,1,0.6)
+  else
+    DEFAULT_CHAT_FRAME:AddMessage("Usage: /theosundermacro <MacroName>", 1,0.6,0.6)
+  end
 end
 
 -- =============================
@@ -254,7 +333,7 @@ local function TryWeaveSwing(rage, btRem, wwRem)
 end
 
 -- =============================
--- Main rotation with Execute gating + swing‑timed weaving + Battle Shout upkeep
+-- Main rotation with Execute gating + swing‑timed weaving + Battle Shout + Sunder
 -- =============================
 function QuickTheoWarrior()
   if not ValidEnemyTarget() then return end
@@ -272,6 +351,9 @@ function QuickTheoWarrior()
   if btReady and rage >= COST_BT and InMeleeRange() then
     if CastBloodthirst() then return end
   end
+
+  -- 1.1) One early Sunder if the target has no Sunder yet (no restrictions)
+  if EarlySunderIfMissing() then return end
 
   -- 2) Keep WW on cooldown when it won't jeopardize BT
   if wwReady and InMeleeRange() then
@@ -305,10 +387,13 @@ function QuickTheoWarrior()
     end
   end
 
+  -- 3.6) Maintain Sunders with macro in safe windows (macro auto-stops at 5)
+  if MaintainSundersMacro(btRem, wwRem) then return end
+
   -- 4) Precise HS/Cleave weaving tied to SP_SwingTimer main‑hand swing (no GCD)
   if TryWeaveSwing(rage, btRem, wwRem) then return end
 
-  -- 5) Optional: maintain Sunder stacks if nothing else to do
+  -- 5) (legacy) optional maintainer (disabled by default)
   if MaintainSunders() then return end
 end
 
@@ -394,5 +479,4 @@ SlashCmdList["THEOSTANCE"] = TheoCharge_EnsureStance
 SLASH_THEOCHARGE1 = "/theocharge"
 SlashCmdList["THEOCHARGE"] = TheoCharge
 
-DEFAULT_CHAT_FRAME:AddMessage("QuickTheoWarrior loaded! /qhtwarrior, /theoexec <n>, /theoexecweave 0|1, /theostance, /theocharge.", 0.5, 1, 0)
-
+DEFAULT_CHAT_FRAME:AddMessage("QuickTheoWarrior loaded! /qhtwarrior, /theoexec <n>, /theoexecweave 0|1, /theosundermacro <name>, /theostance, /theocharge.", 0.5, 1, 0)
