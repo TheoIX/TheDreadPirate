@@ -15,7 +15,7 @@ local GCD_S = 1.5            -- global cooldown seconds
 local EXECUTE_PHASE = 20     -- sub‑20% HP
 local COST_BT = 30
 local COST_WW = 25
-local COST_EXEC = 10          -- Turtle value (consumes all remaining rage)
+local COST_EXEC = 5           -- Improved Execute talented (5 rage base); still dumps remaining rage
 local COST_CLEAVE = 20
 local COST_HS = 12
 local COST_BS = 10            -- Battle Shout
@@ -67,6 +67,20 @@ end
 
 local function InMeleeRange()
   -- any reliable 5 yard check; hard fallback
+  return CheckInteractDistance("target", 3)
+end
+
+-- Prefer CRF (Combat Range Finder) for true melee verification; fall back to spell range.
+local function InTrueMeleeTarget()
+  if UnitExists("target") and type(CRF) == "table" and type(CRF.IsTargetMeleeGreenOrTeal) == "function" then
+    -- GREEN or TEAL arrow from CombatRangeFinder counts as in-range & facing OK
+    return CRF:IsTargetMeleeGreenOrTeal()
+  end
+  -- Fallbacks when CRF isn't loaded: probe with melee-range abilities or interact distance
+  local r1 = IsSpellInRange and IsSpellInRange("Hamstring", "target")
+  local r2 = IsSpellInRange and IsSpellInRange("Sunder Armor", "target")
+  local r3 = IsSpellInRange and IsSpellInRange("Rend", "target")
+  if r1 == 1 or r2 == 1 or r3 == 1 then return true end
   return CheckInteractDistance("target", 3)
 end
 
@@ -263,8 +277,8 @@ end
 local function MaintainSundersMacro(btRem, wwRem)
   if THEO_SUNDER_MAINTAIN ~= 1 then return false end
   if not ValidEnemyTarget() or not InMeleeRange() or not GCDReady() then return false end
-  if btRem <= 0.4 then return false end
-  if wwRem <= 0.2 then return false end
+  if btRem <= GCD_S then return false end
+  if wwRem <= GCD_S then return false end
   return UseSunderMacro()
 end
 
@@ -294,7 +308,7 @@ end
 
 -- Decide if we can safely queue HS/Cleave to land on the **next main‑hand** swing
 local function TryWeaveSwing(rage, btRem, wwRem)
-  if not ValidEnemyTarget() or not InMeleeRange() then return false end
+  if not ValidEnemyTarget() or not InTrueMeleeTarget() then return false end
   -- Disable weaving during execute unless explicitly enabled
   if TargetHealthBelow and TargetHealthBelow(EXECUTE_PHASE) and THEO_EXEC_WEAVE ~= 1 then return false end
   if type(st_timer) ~= "number" or st_timer <= 0 then return false end
@@ -468,6 +482,16 @@ SlashCmdList["THEOEXECWEAVE"] = function(msg)
   end
 end
 
+-- NEW: Cleave toggle – /theocleave flips between Cleave (20 rage) and HS (12 rage)
+SLASH_THEOCLEAVE1 = "/theocleave"
+SlashCmdList["THEOCLEAVE"] = function()
+  useCleave = not useCleave
+  DEFAULT_CHAT_FRAME:AddMessage(
+    "Theo: Cleave mode "..(useCleave and "ENABLED (using Cleave, cost 20)." or "DISABLED (using Heroic Strike, cost 12)."),
+    0.8, 1, 0.6
+  )
+end
+
 SLASH_QHWARRIOR1 = "/qhtwarrior"
 SlashCmdList["QHWARRIOR"] = QuickTheoWarrior
 
@@ -475,8 +499,9 @@ SlashCmdList["QHWARRIOR"] = QuickTheoWarrior
 SLASH_THEOSTANCE1 = "/theostance"
 SlashCmdList["THEOSTANCE"] = TheoCharge_EnsureStance
 
--- New: TheoCharge macro
+-- TheoCharge macro
 SLASH_THEOCHARGE1 = "/theocharge"
 SlashCmdList["THEOCHARGE"] = TheoCharge
 
-DEFAULT_CHAT_FRAME:AddMessage("QuickTheoWarrior loaded! /qhtwarrior, /theoexec <n>, /theoexecweave 0|1, /theosundermacro <name>, /theostance, /theocharge.", 0.5, 1, 0)
+DEFAULT_CHAT_FRAME:AddMessage("QuickTheoWarrior loaded! /qhtwarrior, /theoexec <n>, /theoexecweave 0|1, /theosundermacro <name>, /theocleave, /theostance, /theocharge.", 0.5, 1, 0)
+
