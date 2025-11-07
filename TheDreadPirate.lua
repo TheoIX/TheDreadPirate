@@ -22,11 +22,11 @@ local COST_BS = 10            -- Battle Shout
 
 -- Weaving
 local HS_BUFFER = 5          -- keep this much rage beyond the reserve floor when weaving
-local IMMINENT_BT_WINDOW = 1.2  -- treat BT as imminent if ≤ this many seconds
+local IMMINENT_BT_WINDOW = 0.8  -- treat BT as imminent if ≤ this many seconds
 local IMMINENT_WW_WINDOW = 1.0  -- treat WW as imminent if ≤ this many seconds
 local SWING_QUEUE_WINDOW = 0.35 -- queue HS/Cleave if MH swing is due within this window (seconds)
-local PANIC_RAGE = 95           -- anti‑cap: force weave even if conservative checks fail
-local WW_ONCD_BT_IMMINENT_BARRIER = 0.7 -- seconds: if BT is closer than this and rage < 30, briefly hold WW
+local PANIC_RAGE = 85           -- anti‑cap: force weave even if conservative checks fail
+local WW_ONCD_BT_IMMINENT_BARRIER = 0.5 -- seconds: if BT is closer than this and rage < 30, briefly hold WW
 local EXEC_MIN = 35            -- minimum rage to press Execute (Turtle: Execute dumps remaining rage)
 local THEO_EXEC_WEAVE = 0      -- 0=disable HS/Cleave weaving during execute; 1=allow
 
@@ -225,6 +225,10 @@ local THEO_SUNDER_MAINTAIN = 1      -- 1 = maintain with macro in safe windows
 local THEO_SUNDER_MACRO_NAME = "Sunder5"  -- name of your SuperCleveroid macro
 
 local THEO_SUNDER_MACRO_SLOT, THEO_LAST_MACRO_SCAN = nil, 0
+-- Throttle and pending-GCD confirmation for Sunder macro
+local THEO_SUNDER_MACRO_THROTTLE = 1.0 -- seconds between macro attempts
+local THEO_LAST_SUNDER_MACRO = 0
+local PENDING_GCD_FROM_SUNDER, PENDING_AT, PENDING_RAGE = false, 0, 0
 
 -- Simple check for presence of any Sunder debuff (icon only)
 local function HasSunderDebuff()
@@ -257,12 +261,20 @@ end
 local function UseSunderMacro()
   local slot = RefreshSunderMacroSlot(false)
   if not slot or not HasAction(slot) then return false end
-  UseAction(slot)          -- fires: /cast [debuff:"Sunder Armor"<#5] Sunder Armor
-  lastGCDAt = GetTime()    -- stamp GCD for rotation bookkeeping
+  local now = GetTime()
+  -- Do not spam the macro and do not overlap while awaiting confirmation
+  if (now - THEO_LAST_SUNDER_MACRO) < THEO_SUNDER_MACRO_THROTTLE or PENDING_GCD_FROM_SUNDER then
+    return false
+  end
+  PENDING_RAGE = GetRage()
+  UseAction(slot)                 -- fires the SuperCleveroid conditional macro
+  -- Do NOT stamp lastGCDAt yet; confirm a real GCD or rage spend first
+  PENDING_GCD_FROM_SUNDER, PENDING_AT = true, now
+  THEO_LAST_SUNDER_MACRO = now
   return true
 end
 
--- Fire ONE early Sunder on targets that have no Sunder yet (no BT/WW gating)
+-- Fire ONE early Sunder on targets that have no Sunder yet (no restrictions)
 local function EarlySunderIfMissing()
   if THEO_EARLY_SUNDER ~= 1 then return false end
   if not ValidEnemyTarget() or not InMeleeRange() or not GCDReady() then return false end
@@ -346,10 +358,38 @@ local function TryWeaveSwing(rage, btRem, wwRem)
   return true
 end
 
+function StampIfRealGCD()
+  if not PENDING_GCD_FROM_SUNDER then return end
+  local now = GetTime()
+  -- Probe shared GCD on nominal 0-CD spells
+  local probes = {"Hamstring","Rend","Battle Shout"}
+  for _, sp in ipairs(probes) do
+    local _, start, dur = IsSpellReady(sp)
+    if start and dur and start > 0 and dur >= 1.0 then
+      lastGCDAt = start
+      PENDING_GCD_FROM_SUNDER = false
+      return
+    end
+  end
+  -- Backup: rage delta consistent with Sunder cost
+  if (PENDING_RAGE - GetRage()) >= 10 then
+    lastGCDAt = now
+    PENDING_GCD_FROM_SUNDER = false
+    return
+  end
+  -- If nothing observed within a short window, treat as no-op
+  if (now - PENDING_AT) > 0.35 then
+    PENDING_GCD_FROM_SUNDER = false
+  end
+end
+
 -- =============================
 -- Main rotation with Execute gating + swing‑timed weaving + Battle Shout + Sunder
 -- =============================
 function QuickTheoWarrior()
+  -- Confirm any pending Sunder macro actually triggered the GCD before proceeding
+ StampIfRealGCD()
+
   if not ValidEnemyTarget() then return end
   EnsureBerserkerStance()
 
@@ -504,4 +544,3 @@ SLASH_THEOCHARGE1 = "/theocharge"
 SlashCmdList["THEOCHARGE"] = TheoCharge
 
 DEFAULT_CHAT_FRAME:AddMessage("QuickTheoWarrior loaded! /qhtwarrior, /theoexec <n>, /theoexecweave 0|1, /theosundermacro <name>, /theocleave, /theostance, /theocharge.", 0.5, 1, 0)
-
