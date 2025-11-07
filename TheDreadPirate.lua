@@ -19,6 +19,10 @@ local COST_EXEC = 5           -- Improved Execute talented (5 rage base); still 
 local COST_CLEAVE = 20
 local COST_HS = 12
 local COST_BS = 10            -- Battle Shout
+-- Costs / thresholds
+local COST_MS = 20            -- Master Strike
+local MS_MIN   = 70           -- need a big rage bank to press MS (adjust via /theoms)
+local THEO_MS_ENABLE = 1      -- 1=enable, 0=disable (toggle via /theomsmode)
 
 -- Weaving
 local HS_BUFFER = 5          -- keep this much rage beyond the reserve floor when weaving
@@ -178,6 +182,18 @@ local function CastBattleShout()
   lastGCDAt = GetTime()
   return true
 end
+
+local function CastMasterStrike()
+  local ready = IsSpellReady("Master Strike")
+  if ready and ValidEnemyTarget() and InMeleeRange() and GCDReady() then
+    CastSpellByName("Master Strike")
+    SpellTargetUnit("target")
+    lastGCDAt = GetTime()
+    return true
+  end
+  return false
+end
+
 
 -- (legacy placeholder kept; unused after we switch to macro maintainer)
 local function MaintainSunders()
@@ -443,6 +459,16 @@ function QuickTheoWarrior()
 
   -- 3.6) Maintain Sunders with macro in safe windows (macro auto-stops at 5)
   if MaintainSundersMacro(btRem, wwRem) then return end
+
+      -- 3.7) Master Strike (rage sink) — only when BT/WW are safely on cooldown and rage is high
+    if THEO_MS_ENABLE == 1 and not inExecute then
+     -- Both BT and WW must be on cooldown and not about to come up (safe GCD window)
+     if (not btReady and not wwReady) and btRem > GCD_S and wwRem > GCD_S then
+      if rage >= MS_MIN then
+        if CastMasterStrike() then return end
+      end
+    end
+  end
 
   -- 4) Precise HS/Cleave weaving tied to SP_SwingTimer main‑hand swing (no GCD)
   if TryWeaveSwing(rage, btRem, wwRem) then return end
