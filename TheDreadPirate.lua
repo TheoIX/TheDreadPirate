@@ -13,7 +13,7 @@ local lastBSAt = 0 -- micro lockout after casting Battle Shout to avoid re-cast 
 -- =============================
 local GCD_S = 1.5            -- global cooldown seconds
 local EXECUTE_PHASE = 20     -- sub‑20% HP
-local COST_BT = 30
+local COST_BT = 20
 local COST_WW = 25
 local COST_EXEC = 5           -- Improved Execute talented (5 rage base); still dumps remaining rage
 local COST_CLEAVE = 20
@@ -142,7 +142,7 @@ end
 -- =============================
 local function CastBloodthirst()
   local ready = IsSpellReady("Bloodthirst")
-  if ready and ValidEnemyTarget() and InMeleeRange() and GCDReady() then
+  if ready and ValidEnemyTarget() and InTrueMeleeTarget() then
     CastSpellByName("Bloodthirst")
     SpellTargetUnit("target")
     lastGCDAt = GetTime()
@@ -153,7 +153,7 @@ end
 
 local function CastWhirlwind()
   local ready = IsSpellReady("Whirlwind")
-  if ready and ValidEnemyTarget() and InMeleeRange() and GCDReady() then
+  if ready and ValidEnemyTarget() and InMeleeRange() then
     CastSpellByName("Whirlwind")
     SpellTargetUnit("target")
     lastGCDAt = GetTime()
@@ -164,7 +164,7 @@ end
 
 local function CastExecute()
   local ready = IsSpellReady("Execute")
-  if ready and ValidEnemyTarget() and InMeleeRange() and GCDReady() then
+  if ready and ValidEnemyTarget() and InTrueMeleeTarget() and GCDReady() then
     CastSpellByName("Execute")
     SpellTargetUnit("target")
     lastGCDAt = GetTime()
@@ -185,7 +185,7 @@ end
 
 local function CastMasterStrike()
   local ready = IsSpellReady("Master Strike")
-  if ready and ValidEnemyTarget() and InMeleeRange() and GCDReady() then
+  if ready and ValidEnemyTarget() and InTrueMeleeTarget() and GCDReady() then
     CastSpellByName("Master Strike")
     SpellTargetUnit("target")
     lastGCDAt = GetTime()
@@ -305,8 +305,8 @@ end
 local function MaintainSundersMacro(btRem, wwRem)
   if THEO_SUNDER_MAINTAIN ~= 1 then return false end
   if not ValidEnemyTarget() or not InMeleeRange() or not GCDReady() then return false end
-  if btRem <= GCD_S then return false end
-  if wwRem <= GCD_S then return false end
+  if btRem <= 0.2 then return false end
+  if wwRem <= 0.2 then return false end
   return UseSunderMacro()
 end
 
@@ -439,7 +439,7 @@ function QuickTheoWarrior()
   -- 3) Execute as filler/dump between BT/WW windows (don’t starve them)
   if inExecute and execReady and InMeleeRange() then
     -- Never dump right before BT; it will zero rage and delay BT
-    if btRem <= 1.2 then
+    if btRem <= 0.6 then
       -- hold Execute to preserve BT on-time
     -- If WW is about to come up and BT isn't, prefer WW first
     elseif wwRem <= 0.8 and btRem > 1.2 then
@@ -463,7 +463,7 @@ function QuickTheoWarrior()
       -- 3.7) Master Strike (rage sink) — only when BT/WW are safely on cooldown and rage is high
     if THEO_MS_ENABLE == 1 and not inExecute then
      -- Both BT and WW must be on cooldown and not about to come up (safe GCD window)
-     if (not btReady and not wwReady) and btRem > GCD_S and wwRem > GCD_S then
+     if (not btReady and not wwReady) and btRem > 0.2 and wwRem > 0.2 then
       if rage >= MS_MIN then
         if CastMasterStrike() then return end
       end
