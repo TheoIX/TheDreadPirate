@@ -2,32 +2,74 @@
 -- Execute gating so BT/WW never slip; precise HS/Cleave weaving using SP_SwingTimer.
 -- HS/Cleave do NOT consume GCD, so we time them to main‑hand swing using st_timer.
 
-local BOOKTYPE_SPELL = "spell"
 local useCleave = false
+local useOverpower = true  -- /theoop toggles this
 local lastStanceSwap = 0
 local lastGCDAt = 0
 local lastBSAt = 0 -- micro lockout after casting Battle Shout to avoid re-cast during aura scan delay
+
+local TheoOPPending = false      -- we have committed to an OP sequence (next press = OP)
+local TheoOPExpires = 0          -- safety timeout for that pending sequence
+local THEO_OP_TIMEOUT = 5.0      -- seconds to keep a pending Overpower window alive
+local TheoOPTries = 0            -- how many times we’ll try to fire OP in Battle before giving up
+
+local THEO_OP_ICD = 7.0          -- internal cooldown between successful Overpowers (seconds)
+local TheoLastOPAt = 0           -- last time we successfully cast Overpower
+
+-- Tiny frame watching:
+--   • CHAT_MSG_COMBAT_SELF_MISSES for "Your attack was dodged."
+--   • COMBAT_TEXT_UPDATE SPELL_ACTIVE "Overpower" (the <Overpower> floating text)
+local TheoOPFrame = CreateFrame("Frame")
+TheoOPFrame:RegisterEvent("CHAT_MSG_COMBAT_SELF_MISSES")
+TheoOPFrame:RegisterEvent("COMBAT_TEXT_UPDATE")
+
+TheoOPFrame:SetScript("OnEvent", function()
+  local now = GetTime()
+
+  -- 1) Classic combat log: "Your attack was dodged." / "Your %s was dodged."
+  if event == "CHAT_MSG_COMBAT_SELF_MISSES" then
+    local msg = arg1
+    if not msg then return end
+    if string.find(msg, "dodge") or string.find(msg, "dodged") then
+      TheoHasOPWindow = true
+      TheoOPWindowExpires = now + THEO_OP_TIMEOUT
+    end
+    return
+  end
+
+  -- 2) Floating combat text "spell active" proc: <Overpower>
+  if event == "COMBAT_TEXT_UPDATE" then
+    local updateType = arg1
+    local spellName  = arg2
+    -- Default Blizzard FCT sends SPELL_ACTIVE + spell name here.
+    if updateType == "SPELL_ACTIVE" and spellName and string.find(spellName, "Overpower") then
+      TheoHasOPWindow = true
+      TheoOPWindowExpires = now + THEO_OP_TIMEOUT
+    end
+    return
+  end
+end)
 
 -- =============================
 -- Tuning
 -- =============================
 local GCD_S = 1.5            -- global cooldown seconds
 local EXECUTE_PHASE = 20     -- sub‑20% HP
-local COST_BT = 20
+local COST_BT = 30
 local COST_WW = 25
 local COST_EXEC = 5           -- Improved Execute talented (5 rage base); still dumps remaining rage
 local COST_CLEAVE = 20
 local COST_HS = 12
 local COST_BS = 10            -- Battle Shout
 -- Costs / thresholds
+local COST_PUMMEL = 10  
 local COST_MS = 20            -- Master Strike
 local MS_MIN   = 70           -- need a big rage bank to press MS (adjust via /theoms)
 local THEO_MS_ENABLE = 1      -- 1=enable, 0=disable (toggle via /theomsmode)
-
 -- Weaving
 local HS_BUFFER = 5          -- keep this much rage beyond the reserve floor when weaving
-local IMMINENT_BT_WINDOW = 0.8  -- treat BT as imminent if ≤ this many seconds
-local IMMINENT_WW_WINDOW = 1.0  -- treat WW as imminent if ≤ this many seconds
+local IMMINENT_BT_WINDOW = 0.6  -- treat BT as imminent if ≤ this many seconds
+local IMMINENT_WW_WINDOW = 0.4  -- treat WW as imminent if ≤ this many seconds
 local SWING_QUEUE_WINDOW = 0.35 -- queue HS/Cleave if MH swing is due within this window (seconds)
 local PANIC_RAGE = 85           -- anti‑cap: force weave even if conservative checks fail
 local WW_ONCD_BT_IMMINENT_BARRIER = 0.5 -- seconds: if BT is closer than this and rage < 30, briefly hold WW
@@ -194,6 +236,16 @@ local function CastMasterStrike()
   return false
 end
 
+local function CastPummel()
+  local ready = IsSpellReady("Pummel")
+  if ready and ValidEnemyTarget() and InTrueMeleeTarget() and GCDReady() then
+    CastSpellByName("Pummel")
+    SpellTargetUnit("target")
+    lastGCDAt = GetTime()
+    return true
+  end
+  return false
+end
 
 -- (legacy placeholder kept; unused after we switch to macro maintainer)
 local function MaintainSunders()
@@ -231,6 +283,155 @@ local function IsSwingQueued()
     if IsCurrentAction(slot) then return true end
   end
   return false
+end
+
+-- =============================
+-- Baked-in Overpower handler (stance-dance inside main rotation)
+-- Uses real dodge-based window + no Overpower in Execute phase.
+-- Once Battle Stance is triggered for OP, it’s OP-or-nothing for a few presses.
+-- =============================
+local function TheoOverpower_Rotation(rage, btReady, btRem, wwReady, wwRem, inExecute)
+  -- If the toggle is OFF, clear stale state and bail
+  if not useOverpower then
+    TheoOPPending = false
+    TheoOPTries   = 0
+    TheoOPExpires = 0
+    return false
+  end
+
+  -- Do not use Overpower at all in Execute phase
+  if inExecute then
+    TheoOPPending = false
+    TheoOPTries   = 0
+    TheoOPExpires = 0
+    return false
+  end
+
+  local now = GetTime()
+
+  -- Expire the Overpower window from dodge
+  if TheoHasOPWindow and now > TheoOPWindowExpires then
+    TheoHasOPWindow = false
+  end
+
+  -- Expire any old pending "next press = Overpower" state
+  if TheoOPPending and now > TheoOPExpires then
+    TheoOPPending = false
+    TheoOPTries   = 0
+  end
+
+  -- =========================
+  -- Phase 1: we already committed to an OP sequence
+  -- =========================
+  if TheoOPPending then
+    -- If we have no window or no tries left, drop sequence and resume normal rotation
+    if not TheoHasOPWindow or TheoOPTries <= 0 then
+      TheoOPPending = false
+      TheoOPTries   = 0
+      TheoOPExpires = 0
+      return false
+    end
+
+    -- While pending, NOTHING else in the rotation should fire.
+
+    -- First, make sure we actually are in Battle Stance.
+    if not HasBattleStance() then
+      if (now - lastStanceSwap) > 0.2 then
+        CastSpellByName("Battle Stance")
+        lastStanceSwap = now
+        -- NOTE: do NOT touch lastGCDAt here; stance swap does not use GCD
+      end
+      -- Still in Overpower mode; completely block BT/WW/HS/etc this press.
+      return true
+    end
+
+    -- We are in Battle Stance now. Wait for any existing GCD
+    -- from BT/WW/Sunder/Master Strike to finish.
+    if not GCDReady() then
+      return true
+    end
+
+    -- Try to cast Overpower if window is still really there
+    if TheoHasOPWindow and ValidEnemyTarget() and InTrueMeleeTarget() then
+      CastSpellByName("Overpower")
+      SpellTargetUnit("target")
+      lastGCDAt    = now             -- Overpower DOES use the GCD
+      TheoLastOPAt = now
+
+      -- Consume the opportunity
+      TheoHasOPWindow     = false
+      TheoOPWindowExpires = 0
+      TheoOPPending       = false
+      TheoOPTries         = 0
+      TheoOPExpires       = 0
+      return true
+    end
+
+    -- We got here: in Battle Stance, window flag set, but something blocked cast
+    -- (range/facing/window ended between checks). Try again next press.
+    TheoOPTries = TheoOPTries - 1
+    if TheoOPTries <= 0 then
+      TheoOPPending = false
+      TheoOPTries   = 0
+      TheoOPExpires = 0
+      return false   -- give up and let normal rotation resume next press
+    end
+
+    -- Still in OP mode, nothing else should happen this press.
+    return true
+  end
+
+  -- =========================
+  -- Phase 2: decide whether to *start* an OP sequence
+  -- =========================
+
+  -- No real Overpower proc? Then we don't do anything.
+  if not TheoHasOPWindow then
+    return false
+  end
+
+  -- Internal cooldown: don't start a fresh OP sequence if we just used Overpower
+  if TheoLastOPAt > 0 and (now - TheoLastOPAt) < THEO_OP_ICD then
+    return false
+  end
+
+  -- Start conditions (only checked BEFORE we commit):
+  -- • Rage between 5 and 24
+  -- • BT + WW both NOT ready
+  if rage >= 30 or rage < 5 then return false end
+  if btReady or wwReady then return false end
+  if not ValidEnemyTarget() or not InTrueMeleeTarget() then return false end
+
+  -- If we're already in Battle Stance, just slam Overpower (after respecting GCD) and be done.
+  if HasBattleStance() then
+    if not GCDReady() then
+      -- Hold rotation until the GCD is free, then try again next press
+      return true
+    end
+    CastSpellByName("Overpower")
+    SpellTargetUnit("target")
+    lastGCDAt      = now
+    TheoLastOPAt   = now
+    TheoHasOPWindow     = false
+    TheoOPWindowExpires = 0
+    TheoOPPending       = false
+    TheoOPTries         = 0
+    TheoOPExpires       = 0
+    return true
+  end
+
+  -- Normal flow: Berserker → Battle Stance, then next several presses = Overpower attempts
+  if (now - lastStanceSwap) > 0.2 then
+    CastSpellByName("Battle Stance")
+    lastStanceSwap = now
+    -- NOTE: do NOT touch lastGCDAt here; previous BT/WW/Sunder GCD is still the real one.
+    TheoOPPending  = true
+    TheoOPTries    = 5         -- TRY Overpower up to 5 times before giving up
+    TheoOPExpires  = now + THEO_OP_TIMEOUT  -- safety timeout in case you stop spamming
+  end
+
+  -- While we’re in this path, rotation is “owned” by Overpower logic.
+  return true
 end
 
 -- =============================
@@ -404,10 +605,9 @@ end
 -- =============================
 function QuickTheoWarrior()
   -- Confirm any pending Sunder macro actually triggered the GCD before proceeding
- StampIfRealGCD()
+  StampIfRealGCD()
 
   if not ValidEnemyTarget() then return end
-  EnsureBerserkerStance()
 
   local rage = GetRage()
   local btReady, btStart, btDur = IsSpellReady("Bloodthirst")
@@ -416,6 +616,16 @@ function QuickTheoWarrior()
   local btRem = CDRemaining(btStart, btDur)
   local wwRem = CDRemaining(wwStart, wwDur)
   local inExecute = TargetHealthBelow(EXECUTE_PHASE)
+
+  -- NEW: baked-in Overpower handler.
+  -- If this returns true, we either stance-swapped or cast Overpower; skip the rest.
+   if TheoOverpower_Rotation(rage, btReady, btRem, wwReady, wwRem, inExecute) then
+    return
+  end
+
+  -- Normal rotation continues in Berserker stance
+  EnsureBerserkerStance()
+
 
   -- 1) Keep BT on cooldown (never starve it)
   if btReady and rage >= COST_BT and InMeleeRange() then
@@ -442,7 +652,7 @@ function QuickTheoWarrior()
     if btRem <= 0.6 then
       -- hold Execute to preserve BT on-time
     -- If WW is about to come up and BT isn't, prefer WW first
-    elseif wwRem <= 0.8 and btRem > 1.2 then
+    elseif wwRem <= 0.4 and btRem > 0.6 then
       -- hold Execute so WW stays on-time
     -- Otherwise, only Execute if it's a "fat" dump, or you're about to cap
     elseif rage >= EXEC_MIN or rage >= (PANIC_RAGE - 5) then
@@ -452,13 +662,13 @@ function QuickTheoWarrior()
 
   -- 3.5) Battle Shout upkeep – safe spot: both BT and WW are on cooldown and not imminent
   if PlayerInCombat() and rage >= COST_BS and not HasBattleShout() and (GetTime() - lastBSAt) > 0.7 then
-    if (not btReady and not wwReady) and btRem > GCD_S and wwRem > GCD_S then
+    if (not btReady and not wwReady) and btRem > 0.5 and wwRem > 0.5 then
       if CastBattleShout() then return end
     end
   end
 
   -- 3.6) Maintain Sunders with macro in safe windows (macro auto-stops at 5)
-  if MaintainSundersMacro(btRem, wwRem) then return end
+    if not inExecute and MaintainSundersMacro(btRem, wwRem) then return end
 
       -- 3.7) Master Strike (rage sink) — only when BT/WW are safely on cooldown and rage is high
     if THEO_MS_ENABLE == 1 and not inExecute then
@@ -469,12 +679,25 @@ function QuickTheoWarrior()
       end
     end
   end
+ 
+  -- 3.8) Pummel (interrupt) — same safe GCD window as Master Strike
+  -- Only when BT/WW are both on cooldown and not about to come up, and not in execute.
+  if THEO_MS_ENABLE == 1 and not inExecute then
+    if (not btReady and not wwReady) and btRem > 0.1 and wwRem > 0.1 then
+   if rage >= MS_MIN then
+      if CastPummel() then return end
+    end
+  end
+end
 
   -- 4) Precise HS/Cleave weaving tied to SP_SwingTimer main‑hand swing (no GCD)
-  if TryWeaveSwing(rage, btRem, wwRem) then return end
+     rage = GetRage()
+  local _, btStart2, btDur2 = IsSpellReady("Bloodthirst")
+  local _, wwStart2, wwDur2 = IsSpellReady("Whirlwind")
+  btRem = CDRemaining(btStart2, btDur2)
+  wwRem = CDRemaining(wwStart2, wwDur2)
 
-  -- 5) (legacy) optional maintainer (disabled by default)
-  if MaintainSunders() then return end
+  if TryWeaveSwing(rage, btRem, wwRem) then return end
 end
 
 -- =============================
@@ -554,6 +777,38 @@ SlashCmdList["THEOCLEAVE"] = function()
   useCleave = not useCleave
   DEFAULT_CHAT_FRAME:AddMessage(
     "Theo: Cleave mode "..(useCleave and "ENABLED (using Cleave, cost 20)." or "DISABLED (using Heroic Strike, cost 12)."),
+    0.8, 1, 0.6
+  )
+end
+
+-- Master Strike + Pummel toggle – /theomsmode flips both on/off
+SLASH_THEOMSMODE1 = "/theomsmode"
+SlashCmdList["THEOMSMODE"] = function()
+  if THEO_MS_ENABLE == 1 then
+    THEO_MS_ENABLE = 0
+    DEFAULT_CHAT_FRAME:AddMessage(
+      "Theo: Master Strike + Pummel DISABLED.",
+      1, 0.5, 0.5
+    )
+  else
+    THEO_MS_ENABLE = 1
+    DEFAULT_CHAT_FRAME:AddMessage(
+      "Theo: Master Strike + Pummel ENABLED.",
+      0.5, 1, 0.5
+    )
+  end
+end
+
+-- Overpower toggle – /theoop will enable/disable baked-in Overpower usage
+SLASH_THEOOP1 = "/theoop"
+SlashCmdList["THEOOP"] = function()
+  useOverpower = not useOverpower
+  -- Clear any old pending state when switching modes
+  TheoOPPending = false
+  TheoOPExpires = 0
+
+  DEFAULT_CHAT_FRAME:AddMessage(
+    "Theo: Overpower usage "..(useOverpower and "ENABLED (stance-dancing for Overpower when safe)." or "DISABLED."),
     0.8, 1, 0.6
   )
 end
