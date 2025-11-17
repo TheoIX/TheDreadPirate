@@ -72,6 +72,7 @@ local IMMINENT_BT_WINDOW = 0.6  -- treat BT as imminent if ≤ this many seconds
 local IMMINENT_WW_WINDOW = 0.4  -- treat WW as imminent if ≤ this many seconds
 local SWING_QUEUE_WINDOW = 0.35 -- queue HS/Cleave if MH swing is due within this window (seconds)
 local PANIC_RAGE = 85           -- anti‑cap: force weave even if conservative checks fail
+local EXEC_PANIC_RAGE = 95      -- if rage >= this in execute, ignore BT/WW and just Execute
 local WW_ONCD_BT_IMMINENT_BARRIER = 0.5 -- seconds: if BT is closer than this and rage < 30, briefly hold WW
 local EXEC_MIN = 35            -- minimum rage to press Execute (Turtle: Execute dumps remaining rage)
 local THEO_EXEC_WEAVE = 0      -- 0=disable HS/Cleave weaving during execute; 1=allow
@@ -626,12 +627,18 @@ function QuickTheoWarrior()
   -- Normal rotation continues in Berserker stance
   EnsureBerserkerStance()
 
+  if inExecute and execReady and InMeleeRange() then
+  -- Hard panic: if rage is extremely high, just dump immediately
+            if rage >= EXEC_PANIC_RAGE  then          
+           if CastExecute() then return end
+    end
+end
 
   -- 1) Keep BT on cooldown (never starve it)
   if btReady and rage >= COST_BT and InMeleeRange() then
     if CastBloodthirst() then return end
   end
-
+ 
   -- 1.1) One early Sunder if the target has no Sunder yet (no restrictions)
   if EarlySunderIfMissing() then return end
 
@@ -648,6 +655,10 @@ function QuickTheoWarrior()
 
   -- 3) Execute as filler/dump between BT/WW windows (don’t starve them)
   if inExecute and execReady and InMeleeRange() then
+  -- Hard panic: if rage is extremely high, just dump immediately
+            if rage >= EXEC_PANIC_RAGE  then          
+           if CastExecute() then return end
+    end
     -- Never dump right before BT; it will zero rage and delay BT
     if btRem <= 0.6 then
       -- hold Execute to preserve BT on-time
