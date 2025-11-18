@@ -55,9 +55,9 @@ end)
 -- =============================
 local GCD_S = 1.5            -- global cooldown seconds
 local EXECUTE_PHASE = 20     -- sub‑20% HP
-local COST_BT = 30
+local COST_BT = 20
 local COST_WW = 25
-local COST_EXEC = 5           -- Improved Execute talented (5 rage base); still dumps remaining rage
+local COST_EXEC = 10           -- Improved Execute talented (5 rage base); still dumps remaining rage
 local COST_CLEAVE = 20
 local COST_HS = 12
 local COST_BS = 10            -- Battle Shout
@@ -67,15 +67,16 @@ local COST_MS = 20            -- Master Strike
 local MS_MIN   = 70           -- need a big rage bank to press MS (adjust via /theoms)
 local THEO_MS_ENABLE = 1      -- 1=enable, 0=disable (toggle via /theomsmode)
 -- Weaving
-local HS_BUFFER = 5          -- keep this much rage beyond the reserve floor when weaving
-local IMMINENT_BT_WINDOW = 0.6  -- treat BT as imminent if ≤ this many seconds
-local IMMINENT_WW_WINDOW = 0.4  -- treat WW as imminent if ≤ this many seconds
-local SWING_QUEUE_WINDOW = 0.35 -- queue HS/Cleave if MH swing is due within this window (seconds)
+local HS_BUFFER = 3          -- keep this much rage beyond the reserve floor when weaving
+local IMMINENT_BT_WINDOW = 1.5  -- treat BT as imminent if ≤ this many seconds
+local IMMINENT_WW_WINDOW = 1.5  -- treat WW as imminent if ≤ this many seconds
+local SWING_QUEUE_WINDOW = 0.45 -- queue HS/Cleave if MH swing is due within this window (seconds)
 local PANIC_RAGE = 85           -- anti‑cap: force weave even if conservative checks fail
-local EXEC_PANIC_RAGE = 95      -- if rage >= this in execute, ignore BT/WW and just Execute
-local WW_ONCD_BT_IMMINENT_BARRIER = 0.5 -- seconds: if BT is closer than this and rage < 30, briefly hold WW
-local EXEC_MIN = 35            -- minimum rage to press Execute (Turtle: Execute dumps remaining rage)
+local EXEC_PANIC_RAGE = 60      -- if rage >= this in execute, ignore BT/WW and just Execute
+local WW_ONCD_BT_IMMINENT_BARRIER = 1.5 -- seconds: if BT is closer than this and rage < 30, briefly hold WW
+local EXEC_MIN = 10            -- minimum rage to press Execute (Turtle: Execute dumps remaining rage)
 local THEO_EXEC_WEAVE = 0      -- 0=disable HS/Cleave weaving during execute; 1=allow
+local earlySunderUsed = false 
 
 -- =============================
 -- Utilities
@@ -492,23 +493,36 @@ local function UseSunderMacro()
   return true
 end
 
--- Fire ONE early Sunder on targets that have no Sunder yet (no restrictions)
 local function EarlySunderIfMissing()
   if THEO_EARLY_SUNDER ~= 1 then return false end
+
+  -- Only once per combat
+  if earlySunderUsed then return false end
+
+  -- Only bother once we’ve actually entered combat
+  if not PlayerInCombat() then return false end
+
   if not ValidEnemyTarget() or not InMeleeRange() or not GCDReady() then return false end
-  if HasSunderDebuff() then return false end
-  if GetRage() < 15 then return false end -- keep a small floor so we don't zero out on pull
-  CastSpellByName("Sunder Armor"); SpellTargetUnit("target")
+
+  -- NOTE: removed this so we always add ONE sunder, even if some are already up:
+  -- if HasSunderDebuff() then return false end
+
+  if GetRage() < 10 then return false end -- keep a small floor so we don't zero out on pull
+
+  CastSpellByName("Sunder Armor")
+  SpellTargetUnit("target")
   lastGCDAt = GetTime()
+  earlySunderUsed = true
   return true
 end
+
 
 -- Maintain via macro in safe BT/WW windows (macro self-stops at 5)
 local function MaintainSundersMacro(btRem, wwRem)
   if THEO_SUNDER_MAINTAIN ~= 1 then return false end
   if not ValidEnemyTarget() or not InMeleeRange() or not GCDReady() then return false end
-  if btRem <= 0.2 then return false end
-  if wwRem <= 0.2 then return false end
+    if btRem <= GCD_S then return false end
+       if wwRem <= GCD_S then return false end
   return UseSunderMacro()
 end
 
@@ -608,6 +622,10 @@ function QuickTheoWarrior()
   -- Confirm any pending Sunder macro actually triggered the GCD before proceeding
   StampIfRealGCD()
 
+if not PlayerInCombat() then
+    earlySunderUsed = false
+  end
+
   if not ValidEnemyTarget() then return end
 
   local rage = GetRage()
@@ -627,53 +645,84 @@ function QuickTheoWarrior()
   -- Normal rotation continues in Berserker stance
   EnsureBerserkerStance()
 
-  if inExecute and execReady and InMeleeRange() then
-  -- Hard panic: if rage is extremely high, just dump immediately
-            if rage >= EXEC_PANIC_RAGE  then          
-           if CastExecute() then return end
-    end
-end
 
-  -- 1) Keep BT on cooldown (never starve it)
-  if btReady and rage >= COST_BT and InMeleeRange() then
-    if CastBloodthirst() then return end
-  end
- 
   -- 1.1) One early Sunder if the target has no Sunder yet (no restrictions)
   if EarlySunderIfMissing() then return end
 
-  -- 2) Keep WW on cooldown when it won't jeopardize BT
-  if wwReady and InMeleeRange() then
-    local btImminent = (btRem <= WW_ONCD_BT_IMMINENT_BARRIER)
-    -- Fire WW essentially on cooldown: only hold if BT is very close AND we don't have 30 rage banked
-    if (not btImminent) or (rage >= COST_BT) then
-      if rage >= COST_WW then
+  -- 1–3) Core rotation with execute-phase BT/WW rules
+  if inExecute then
+    -- Rage bands for execute-phase behavior
+    local inExecLow  = (rage >= EXEC_MIN and rage < 30)  -- 10–30
+    local inExecMid  = (rage >= 30 and rage <= 60)       -- 30–60 window
+    local inExecHigh = (rage > 60)                       -- 60–100+
+
+    -- A) 10–30 and 60–100 rage: Execute has top priority
+    if (inExecLow or inExecHigh) and execReady and InMeleeRange() then
+      if CastExecute() then return end
+    end
+
+    -- B) 30–60 rage: behavior depends on HS vs Cleave mode
+    if inExecMid then
+      if not useCleave then
+        -- HS mode: 30–60 window = BT if ready, otherwise Execute
+        if btReady and rage >= COST_BT and InMeleeRange() then
+          if CastBloodthirst() then return end
+        elseif execReady and rage >= EXEC_MIN and InMeleeRange() then
+          if CastExecute() then return end
+        end
+      else
+        -- Cleave mode: BT or WW if ready, otherwise Execute
+        if btReady and rage >= COST_BT and InMeleeRange() then
+          if CastBloodthirst() then return end
+        elseif wwReady and rage >= COST_WW and InMeleeRange() then
+          -- Don’t start a WW GCD if BT will be ready during it
+          local btImminent = (btRem <= GCD_S)
+          if not btImminent then
+            if CastWhirlwind() then return end
+          end
+        elseif execReady and rage >= EXEC_MIN and InMeleeRange() then
+          if CastExecute() then return end
+        end
+      end
+    end
+
+    -- C) Fallback inside execute if nothing has fired yet: BT > WW > Execute
+    if btReady and rage >= COST_BT and InMeleeRange() then
+      if CastBloodthirst() then return end
+    end
+
+    -- Only allow Whirlwind as a fallback in execute if Cleave mode is ON
+    if useCleave and wwReady and rage >= COST_WW and InMeleeRange() then
+      local btImminent = (btRem <= GCD_S)
+      if not btImminent then
+        if CastWhirlwind() then return end
+      end
+    end
+
+    if execReady and rage >= EXEC_MIN and InMeleeRange() then
+      if CastExecute() then return end
+    end
+
+  else
+    -- Non-execute phase: standard BT -> WW priority
+
+    -- 1) Bloodthirst on cooldown
+    if btReady and rage >= COST_BT and InMeleeRange() then
+      if CastBloodthirst() then return end
+    end
+
+    -- 2) Whirlwind when it won't jeopardize BT
+    if wwReady and rage >= COST_WW and InMeleeRange() then
+      local btImminent = (btRem <= GCD_S)
+      if not btImminent then
         if CastWhirlwind() then return end
       end
     end
   end
 
-  -- 3) Execute as filler/dump between BT/WW windows (don’t starve them)
-  if inExecute and execReady and InMeleeRange() then
-  -- Hard panic: if rage is extremely high, just dump immediately
-            if rage >= EXEC_PANIC_RAGE  then          
-           if CastExecute() then return end
-    end
-    -- Never dump right before BT; it will zero rage and delay BT
-    if btRem <= 0.6 then
-      -- hold Execute to preserve BT on-time
-    -- If WW is about to come up and BT isn't, prefer WW first
-    elseif wwRem <= 0.4 and btRem > 0.6 then
-      -- hold Execute so WW stays on-time
-    -- Otherwise, only Execute if it's a "fat" dump, or you're about to cap
-    elseif rage >= EXEC_MIN or rage >= (PANIC_RAGE - 5) then
-      if CastExecute() then return end
-    end
-  end
-
   -- 3.5) Battle Shout upkeep – safe spot: both BT and WW are on cooldown and not imminent
   if PlayerInCombat() and rage >= COST_BS and not HasBattleShout() and (GetTime() - lastBSAt) > 0.7 then
-    if (not btReady and not wwReady) and btRem > 0.5 and wwRem > 0.5 then
+      if (not btReady and not wwReady) and btRem > GCD_S and wwRem > GCD_S then
       if CastBattleShout() then return end
     end
   end
@@ -684,7 +733,7 @@ end
       -- 3.7) Master Strike (rage sink) — only when BT/WW are safely on cooldown and rage is high
     if THEO_MS_ENABLE == 1 and not inExecute then
      -- Both BT and WW must be on cooldown and not about to come up (safe GCD window)
-     if (not btReady and not wwReady) and btRem > 0.2 and wwRem > 0.2 then
+       if (not btReady and not wwReady) and btRem > GCD_S and wwRem > GCD_S then
       if rage >= MS_MIN then
         if CastMasterStrike() then return end
       end
@@ -694,8 +743,8 @@ end
   -- 3.8) Pummel (interrupt) — same safe GCD window as Master Strike
   -- Only when BT/WW are both on cooldown and not about to come up, and not in execute.
   if THEO_MS_ENABLE == 1 and not inExecute then
-    if (not btReady and not wwReady) and btRem > 0.1 and wwRem > 0.1 then
-   if rage >= MS_MIN then
+      if (not btReady and not wwReady) and btRem > GCD_S and wwRem > GCD_S then
+     if rage >= MS_MIN then
       if CastPummel() then return end
     end
   end
@@ -742,11 +791,25 @@ local function TheoCharge()
     if ready then CastSpellByName("Intercept") end
     return
   else
-    -- Out of combat: ensure Battle Stance; next press will Charge
+    -- Out of combat
+
+    -- If we're already in Berserker Stance and floating a lot of rage,
+    -- just Intercept instead of stance dancing back to Battle for Charge.
+    if HasBerserkerStance() and GetRage() >= 50 then
+      local ready = IsSpellReady("Intercept")
+      if ready then
+        CastSpellByName("Intercept")
+        return
+      end
+      -- if Intercept isn't ready, fall through to normal Charge logic
+    end
+
+    -- Default: make sure we're in Battle Stance, then Charge
     if not HasBattleStance() then
       CastSpellByName("Battle Stance")
       return
     end
+
     -- We’re in the correct stance; just try Charge (no range gate here)
     local ready = IsSpellReady("Charge")
     if ready then CastSpellByName("Charge") end
