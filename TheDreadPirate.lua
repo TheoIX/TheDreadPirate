@@ -15,6 +15,8 @@ local TheoOPTries = 0            -- how many times we’ll try to fire OP in Bat
 
 local THEO_OP_ICD = 7.0          -- internal cooldown between successful Overpowers (seconds)
 local TheoLastOPAt = 0           -- last time we successfully cast Overpower
+local slamWindowExpires = 0
+local lastMHTimeLeft    = nil
 
 -- Tiny frame watching:
 --   • CHAT_MSG_COMBAT_SELF_MISSES for "Your attack was dodged."
@@ -54,6 +56,7 @@ end)
 -- Tuning
 -- =============================
 local GCD_S = 1.5            -- global cooldown seconds
+local GCD_SLAM = 1.0         -- Slam triggers only a 1.0s GCD with talent
 local EXECUTE_PHASE = 20     -- sub‑20% HP
 local COST_BT = 20
 local COST_WW = 25
@@ -77,6 +80,9 @@ local WW_ONCD_BT_IMMINENT_BARRIER = 1.5 -- seconds: if BT is closer than this an
 local EXEC_MIN = 10            -- minimum rage to press Execute (Turtle: Execute dumps remaining rage)
 local THEO_EXEC_WEAVE = 0      -- 0=disable HS/Cleave weaving during execute; 1=allow
 local earlySunderUsed = false 
+local COST_MORTAL_STRIKE = 30   -- Arms Mortal Strike cost / threshold gating
+local COST_SLAM          = 15   -- Slam base cost
+local SLAM_WINDOW        = 0.40 -- seconds after a white swing where we’re allowed to start a Slam
 
 -- =============================
 -- Utilities
@@ -181,6 +187,25 @@ local function HasBattleShout()
   return false
 end
 
+local function TheoArms_CanSlam(rage, inExecute)
+  local now = GetTime()
+
+  -- Only right after a white swing
+  if slamWindowExpires <= now then return false end
+  if not ValidEnemyTarget() or not InTrueMeleeTarget() then return false end
+  if not GCDReady() then return false end
+  if type(st_timer) ~= "number" or st_timer <= 0 or st_timer > 10 then return false end
+  if rage < COST_SLAM then return false end
+
+  -- During execute, if we’re in the high-rage "panic execute" band, let Execute handle it.
+  if inExecute and rage >= EXEC_PANIC_RAGE then
+    return false
+  end
+
+  return true
+end
+
+
 -- =============================
 -- Casting helpers
 -- =============================
@@ -249,10 +274,39 @@ local function CastPummel()
   return false
 end
 
+local function CastMortalStrike()
+  local ready = IsSpellReady("Mortal Strike")
+  if ready and ValidEnemyTarget() and InTrueMeleeTarget() then
+    CastSpellByName("Mortal Strike")
+    SpellTargetUnit("target")
+    lastGCDAt = GetTime()
+    return true
+  end
+  return false
+end
+
+local function CastSlam()
+  local ready = IsSpellReady("Slam")
+  if not ready then return false end
+  if not GCDReady() then return false end
+  if not ValidEnemyTarget() or not InTrueMeleeTarget() then return false end
+
+  CastSpellByName("Slam")
+  SpellTargetUnit("target")
+
+  -- Backdate GCD so the script only waits GCD_SLAM seconds after Slam
+  local now = GetTime()
+  lastGCDAt = now - (GCD_S - GCD_SLAM)
+
+  return true
+end
+
+
 -- (legacy placeholder kept; unused after we switch to macro maintainer)
 local function MaintainSunders()
   return false
 end
+
 
 -- =============================
 -- HS/Cleave swing queue detection (action bar scan + SP_SwingTimer)
@@ -286,6 +340,33 @@ local function IsSwingQueued()
   end
   return false
 end
+
+-- =============================
+-- Slam swing tracking (Arms mode)
+-- =============================
+-- slamWindowExpires / lastMHTimeLeft are declared near the top of the file
+-- so TheoArms_CanSlam and TheoArms_UpdateSlamWindow share the same state.
+
+-- Called every /theoarms press. Uses st_timer (seconds until next MH swing)
+-- from SP_SwingTimer to detect when a white hit just landed.
+local function TheoArms_UpdateSlamWindow()
+  if type(st_timer) ~= "number" or st_timer <= 0 or st_timer > 10 then
+    return
+  end
+
+  local now = GetTime()
+
+  if lastMHTimeLeft then
+    -- st_timer counts DOWN to 0, then jumps UP when a swing fires.
+    -- If it jumps up by a bit, treat that as "we just got a white hit".
+    if st_timer > (lastMHTimeLeft + 0.2) then
+      slamWindowExpires = now + SLAM_WINDOW
+    end
+  end
+
+  lastMHTimeLeft = st_timer
+end
+
 
 -- =============================
 -- Baked-in Overpower handler (stance-dance inside main rotation)
@@ -760,6 +841,81 @@ end
   if TryWeaveSwing(rage, btRem, wwRem) then return end
 end
 
+function QuickTheoArms()
+  -- Confirm any pending Sunder macro actually triggered the GCD before proceeding
+  StampIfRealGCD()
+
+  if not PlayerInCombat() then
+    earlySunderUsed = false
+  end
+
+  if not ValidEnemyTarget() then return end
+
+  -- Track swings for Slam weaving
+  TheoArms_UpdateSlamWindow()
+
+  local rage = GetRage()
+  local msReady, msStart, msDur = IsSpellReady("Mortal Strike")
+  local wwReady, wwStart, wwDur = IsSpellReady("Whirlwind")
+  local execReady = IsSpellReady("Execute")
+
+  local msRem = CDRemaining(msStart, msDur)
+  local wwRem = CDRemaining(wwStart, wwDur)
+  local inExecute = TargetHealthBelow(EXECUTE_PHASE)
+
+  -- Overpower handler – treat Mortal Strike as the "big button" for gating
+  if TheoOverpower_Rotation(rage, msReady, msRem, wwReady, wwRem, inExecute) then
+    return
+  end
+
+  -- Arms baseline: still live in Berserker for damage; OP logic stance-dances as needed.
+  EnsureBerserkerStance()
+
+  -- One early Sunder per combat (same as Fury)
+  if EarlySunderIfMissing() then return end
+
+  -- Execute phase: if we’re about to cap rage, dump first.
+  if inExecute and execReady and rage >= EXEC_PANIC_RAGE and InMeleeRange() and GCDReady() then
+    if CastExecute() then return end
+  end
+
+  -- 1) Slam — bread and butter, charged immediately after every auto
+  rage = GetRage()
+  if TheoArms_CanSlam(rage, inExecute) then
+    if CastSlam() then return end
+  end
+
+  -- 2) Mortal Strike only when we have "extra" rage above Slam fuel
+  --    (pay for MS and still keep at least COST_SLAM rage in the bank)
+  rage = GetRage()
+  if msReady and InMeleeRange() and rage >= (COST_MORTAL_STRIKE + COST_SLAM) then
+    if CastMortalStrike() then return end
+  end
+
+  -- 3) Whirlwind – same idea: don't steal Slam rage
+  rage = GetRage()
+  if wwReady and InMeleeRange() and rage >= (COST_WW + COST_SLAM) then
+    if CastWhirlwind() then return end
+  end
+
+  -- 4) Battle Shout upkeep – safe spot when MS & WW are both truly on cooldown
+  if PlayerInCombat() and rage >= COST_BS and not HasBattleShout() and (GetTime() - lastBSAt) > 0.7 then
+    if (not msReady and not wwReady) and msRem > GCD_S and wwRem > GCD_S then
+      if CastBattleShout() then return end
+    end
+  end
+
+  -- 5) Maintain Sunders with macro in safe windows (use MS cooldown as the "BT" reference)
+  if not inExecute and MaintainSundersMacro(msRem, wwRem) then return end
+
+  -- 6) Execute as a fallback in execute phase (prio is still MS/WW + Slam below 60 rage)
+  if inExecute and execReady and rage >= EXEC_MIN and InMeleeRange() and GCDReady() then
+    if CastExecute() then return end
+  end
+
+  -- NOTE: No HS/Cleave weaving in Arms for now; Slam is the primary swing-synced filler.
+end
+
 -- =============================
 -- TheoCharge helper (two-press opener: OOC Battle Stance → Charge; IC Berserker Stance → Intercept)
 -- =============================
@@ -897,5 +1053,8 @@ SlashCmdList["THEOSTANCE"] = TheoCharge_EnsureStance
 -- TheoCharge macro
 SLASH_THEOCHARGE1 = "/theocharge"
 SlashCmdList["THEOCHARGE"] = TheoCharge
+
+SLASH_THEOARMS1 = "/theoarms"
+SlashCmdList["THEOARMS"] = QuickTheoArms
 
 DEFAULT_CHAT_FRAME:AddMessage("QuickTheoWarrior loaded! /qhtwarrior, /theoexec <n>, /theoexecweave 0|1, /theosundermacro <name>, /theocleave, /theostance, /theocharge.", 0.5, 1, 0)
