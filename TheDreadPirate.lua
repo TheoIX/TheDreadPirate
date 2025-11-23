@@ -58,7 +58,7 @@ end)
 local GCD_S = 1.5            -- global cooldown seconds
 local GCD_SLAM = 1.0         -- Slam triggers only a 1.0s GCD with talent
 local EXECUTE_PHASE = 20     -- sub‑20% HP
-local COST_BT = 20
+local COST_BT = 30
 local COST_WW = 25
 local COST_EXEC = 10           -- Improved Execute talented (5 rage base); still dumps remaining rage
 local COST_CLEAVE = 20
@@ -70,7 +70,7 @@ local COST_MS = 20            -- Master Strike
 local MS_MIN   = 70           -- need a big rage bank to press MS (adjust via /theoms)
 local THEO_MS_ENABLE = 1      -- 1=enable, 0=disable (toggle via /theomsmode)
 -- Weaving
-local HS_BUFFER = 3          -- keep this much rage beyond the reserve floor when weaving
+local HS_BUFFER = 0          -- keep this much rage beyond the reserve floor when weaving
 local IMMINENT_BT_WINDOW = 1.5  -- treat BT as imminent if ≤ this many seconds
 local IMMINENT_WW_WINDOW = 1.5  -- treat WW as imminent if ≤ this many seconds
 local SWING_QUEUE_WINDOW = 0.45 -- queue HS/Cleave if MH swing is due within this window (seconds)
@@ -725,7 +725,19 @@ if not PlayerInCombat() then
 
   -- Normal rotation continues in Berserker stance
   EnsureBerserkerStance()
+ 
+ -- NEW 0.x) High-rage HS/Cleave: queue on every press above 90 rage (non-execute)
+  -- This does NOT return, so BT/WW/Execute can still be cast in the same press.
+  if not inExecute
+     and rage >= 90
+     and ValidEnemyTarget()
+     and InTrueMeleeTarget()
+     and not IsSwingQueued() then
 
+    local spellName = useCleave and "Cleave" or "Heroic Strike"
+    CastSpellByName(spellName)
+    -- no return here: we still fall through to Sunder/BT/WW logic
+  end
 
   -- 1.1) One early Sunder if the target has no Sunder yet (no restrictions)
   if EarlySunderIfMissing() then return end
