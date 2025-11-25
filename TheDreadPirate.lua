@@ -121,7 +121,7 @@ end
 
 local function InMeleeRange()
   -- any reliable 5 yard check; hard fallback
-  return CheckInteractDistance("target", 3)
+  return CheckInteractDistance("target", 2)
 end
 
 -- Prefer CRF (Combat Range Finder) for true melee verification; fall back to spell range.
@@ -135,7 +135,7 @@ local function InTrueMeleeTarget()
   local r2 = IsSpellInRange and IsSpellInRange("Sunder Armor", "target")
   local r3 = IsSpellInRange and IsSpellInRange("Rend", "target")
   if r1 == 1 or r2 == 1 or r3 == 1 then return true end
-  return CheckInteractDistance("target", 3)
+  return CheckInteractDistance("target", 2)
 end
 
 local function TargetHealthBelow(p)
@@ -583,7 +583,7 @@ local function EarlySunderIfMissing()
   -- Only bother once we’ve actually entered combat
   if not PlayerInCombat() then return false end
 
-  if not ValidEnemyTarget() or not InMeleeRange() or not GCDReady() then return false end
+  if not ValidEnemyTarget() or not InTrueMeleeTarget() or not GCDReady() then return false end
 
   -- NOTE: removed this so we always add ONE sunder, even if some are already up:
   -- if HasSunderDebuff() then return false end
@@ -601,7 +601,7 @@ end
 -- Maintain via macro in safe BT/WW windows (macro self-stops at 5)
 local function MaintainSundersMacro(btRem, wwRem)
   if THEO_SUNDER_MAINTAIN ~= 1 then return false end
-  if not ValidEnemyTarget() or not InMeleeRange() or not GCDReady() then return false end
+  if not ValidEnemyTarget() or not InTrueMeleeTarget() or not GCDReady() then return false end
     if btRem <= GCD_S then return false end
        if wwRem <= GCD_S then return false end
   return UseSunderMacro()
@@ -750,7 +750,7 @@ if not PlayerInCombat() then
     local inExecHigh = (rage > 60)                       -- 60–100+
 
     -- A) 10–30 and 60–100 rage: Execute has top priority
-    if (inExecLow or inExecHigh) and execReady and InMeleeRange() then
+    if (inExecLow or inExecHigh) and execReady and InTrueMeleeTarget() then
       if CastExecute() then return end
     end
 
@@ -758,41 +758,41 @@ if not PlayerInCombat() then
     if inExecMid then
       if not useCleave then
         -- HS mode: 30–60 window = BT if ready, otherwise Execute
-        if btReady and rage >= COST_BT and InMeleeRange() then
+        if btReady and rage >= COST_BT and InTrueMeleeTarget() then
           if CastBloodthirst() then return end
-        elseif execReady and rage >= EXEC_MIN and InMeleeRange() then
+        elseif execReady and rage >= EXEC_MIN and InTrueMeleeTarget() then
           if CastExecute() then return end
         end
       else
         -- Cleave mode: BT or WW if ready, otherwise Execute
-        if btReady and rage >= COST_BT and InMeleeRange() then
+        if btReady and rage >= COST_BT and InTrueMeleeTarget() then
           if CastBloodthirst() then return end
-        elseif wwReady and rage >= COST_WW and InMeleeRange() then
+        elseif wwReady and rage >= COST_WW and InTrueMeleeTarget() then
           -- Don’t start a WW GCD if BT will be ready during it
           local btImminent = (btRem <= GCD_S)
           if not btImminent then
             if CastWhirlwind() then return end
           end
-        elseif execReady and rage >= EXEC_MIN and InMeleeRange() then
+        elseif execReady and rage >= EXEC_MIN and InTrueMeleeTarget() then
           if CastExecute() then return end
         end
       end
     end
 
     -- C) Fallback inside execute if nothing has fired yet: BT > WW > Execute
-    if btReady and rage >= COST_BT and InMeleeRange() then
+    if btReady and rage >= COST_BT and InTrueMeleeTarget() then
       if CastBloodthirst() then return end
     end
 
     -- Only allow Whirlwind as a fallback in execute if Cleave mode is ON
-    if useCleave and wwReady and rage >= COST_WW and InMeleeRange() then
+    if useCleave and wwReady and rage >= COST_WW and InTrueMeleeTarget() then
       local btImminent = (btRem <= GCD_S)
       if not btImminent then
         if CastWhirlwind() then return end
       end
     end
 
-    if execReady and rage >= EXEC_MIN and InMeleeRange() then
+    if execReady and rage >= EXEC_MIN and InTrueMeleeTarget() then
       if CastExecute() then return end
     end
 
@@ -800,7 +800,7 @@ if not PlayerInCombat() then
     -- Non-execute phase: standard BT -> WW priority
 
     -- 1) Bloodthirst on cooldown
-    if btReady and rage >= COST_BT and InMeleeRange() then
+    if btReady and rage >= COST_BT and InTrueMeleeTarget() then
       if CastBloodthirst() then return end
     end
 
@@ -887,7 +887,7 @@ function QuickTheoArms()
   if EarlySunderIfMissing() then return end
 
   -- Execute phase: if we’re about to cap rage, dump first.
-  if inExecute and execReady and rage >= EXEC_PANIC_RAGE and InMeleeRange() and GCDReady() then
+  if inExecute and execReady and rage >= EXEC_PANIC_RAGE and InTrueMeleeTarget() and GCDReady() then
     if CastExecute() then return end
   end
 
@@ -900,7 +900,7 @@ function QuickTheoArms()
   -- 2) Mortal Strike only when we have "extra" rage above Slam fuel
   --    (pay for MS and still keep at least COST_SLAM rage in the bank)
   rage = GetRage()
-  if msReady and InMeleeRange() and rage >= (COST_MORTAL_STRIKE + COST_SLAM) then
+  if msReady and InTrueMeleeTarget() and rage >= (COST_MORTAL_STRIKE + COST_SLAM) then
     if CastMortalStrike() then return end
   end
 
@@ -921,7 +921,7 @@ function QuickTheoArms()
   if not inExecute and MaintainSundersMacro(msRem, wwRem) then return end
 
   -- 6) Execute as a fallback in execute phase (prio is still MS/WW + Slam below 60 rage)
-  if inExecute and execReady and rage >= EXEC_MIN and InMeleeRange() and GCDReady() then
+  if inExecute and execReady and rage >= EXEC_MIN and InTrueMeleeTarget() and GCDReady() then
     if CastExecute() then return end
   end
 
