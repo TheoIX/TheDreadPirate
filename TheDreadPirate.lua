@@ -986,6 +986,64 @@ local function TheoCharge()
 end
 
 -- =============================
+-- Raid buff checker (/theobuffs)
+-- =============================
+local TheoBuffTip = CreateFrame("GameTooltip", "TheoBuffTip", UIParent, "GameTooltipTemplate")
+TheoBuffTip:SetOwner(UIParent, "ANCHOR_NONE")
+
+local function Theo_PlayerHasBuff(patterns)
+  if type(patterns) == "string" then patterns = {patterns} end
+
+  for i = 1, 40 do
+    TheoBuffTip:ClearLines()
+    TheoBuffTip:SetUnitBuff("player", i)
+
+    local t1 = _G["TheoBuffTipTextLeft1"]
+    local name = t1 and t1:GetText()
+    if not name then break end
+
+    local nl = string.lower(name)
+    for _, p in ipairs(patterns) do
+      if p and p ~= "" and string.find(nl, string.lower(p), 1, true) then
+        return true
+      end
+    end
+  end
+
+  return false
+end
+
+local THEO_RAID_BUFFS = {
+  {"Winterfall Firewater"},
+  {"Juju Power"},
+  {"Medivh's Merlot", "Merlot"},
+  {"Well Fed"},
+  {"Elixir of Fortitude"},
+  {"Elixir of the Mongoose"},
+  {"Spirit of Zanza"},
+  {"Elemental Sharpening Stone", "Sharpening Stone"},
+  {"R.O.I.D.S.", "R.O.I.D.S", "ROIDS"},
+}
+
+SLASH_THEOBUFFS1 = "/theobuffs"
+SlashCmdList["THEOBUFFS"] = function()
+  local missing = {}
+
+  for _, entry in ipairs(THEO_RAID_BUFFS) do
+    local label = entry[1]
+    if not Theo_PlayerHasBuff(entry) then
+      table.insert(missing, label)
+    end
+  end
+
+  if table.getn(missing) == 0 then
+    DEFAULT_CHAT_FRAME:AddMessage("Theo: Buff check OK (all listed raid buffs found).", 0.5, 1, 0.5)
+  else
+    DEFAULT_CHAT_FRAME:AddMessage("Theo: Missing buffs -> " .. table.concat(missing, ", "), 1, 0.5, 0.5)
+  end
+end
+
+-- =============================
 -- Slash commands
 -- =============================
 
