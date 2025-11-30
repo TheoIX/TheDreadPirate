@@ -7,6 +7,7 @@ local useOverpower = true  -- /theoop toggles this
 local lastStanceSwap = 0
 local lastGCDAt = 0
 local lastBSAt = 0 -- micro lockout after casting Battle Shout to avoid re-cast during aura scan delay
+local lastDemoAt = 0 -- micro lockout after casting Demo Shout (debuff scan delay)
 
 local TheoOPPending = false      -- we have committed to an OP sequence (next press = OP)
 local TheoOPExpires = 0          -- safety timeout for that pending sequence
@@ -64,6 +65,7 @@ local COST_EXEC = 10           -- Improved Execute talented (5 rage base); still
 local COST_CLEAVE = 20
 local COST_HS = 12
 local COST_BS = 10            -- Battle Shout
+local COST_REVENGE = 5
 -- Costs / thresholds
 local COST_PUMMEL = 10  
 local COST_MS = 20            -- Master Strike
@@ -83,6 +85,8 @@ local earlySunderUsed = false
 local COST_MORTAL_STRIKE = 30   -- Arms Mortal Strike cost / threshold gating
 local COST_SLAM          = 15   -- Slam base cost
 local SLAM_WINDOW        = 0.40 -- seconds after a white swing where we’re allowed to start a Slam
+local COST_TC = 20            -- Thunder Clap
+local COST_DEMO = 10  -- Demoralizing Shout
 
 -- =============================
 -- Utilities
@@ -98,6 +102,17 @@ local function IsSpellReady(spellName)
     end
   end
   return false, 0, 0
+end
+
+local function IsSpellUsableNow(spellName)
+  if type(IsUsableSpell) ~= "function" then return true end
+  local usable, notEnough = IsUsableSpell(spellName)
+  if usable == nil then return true end
+  if usable == 1 or usable == true then
+    if notEnough == 1 or notEnough == true then return false end
+    return true
+  end
+  return false
 end
 
 local function CDRemaining(start, duration)
@@ -149,6 +164,78 @@ local function GCDReady()
 end
 
 -- =============================
+-- Dual/Shield swap macros (by aggro)
+-- =============================
+local THEO_DUAL_MACRO_NAME   = "Dual"
+local THEO_SHIELD_MACRO_NAME = "Shield"
+
+local THEO_DUAL_MACRO_SLOT, THEO_SHIELD_MACRO_SLOT = nil, nil
+local THEO_SWAP_LAST_SCAN = 0
+local THEO_SWAP_THROTTLE  = 0.25
+local THEO_SWAP_LAST_AT   = 0
+local THEO_LAST_SWAP_MODE = nil  -- "dual" or "shield"
+
+local function RefreshSwapMacroSlots(force)
+  local now = GetTime()
+  if not force
+     and (now - THEO_SWAP_LAST_SCAN) < 1.0
+     and THEO_DUAL_MACRO_SLOT and THEO_SHIELD_MACRO_SLOT then
+    return
+  end
+
+  THEO_SWAP_LAST_SCAN = now
+  THEO_DUAL_MACRO_SLOT, THEO_SHIELD_MACRO_SLOT = nil, nil
+
+  for slot = 1, 120 do
+    local name = GetActionText(slot) -- macros return their macro name here
+    if name == THEO_DUAL_MACRO_NAME then
+      THEO_DUAL_MACRO_SLOT = slot
+    elseif name == THEO_SHIELD_MACRO_NAME then
+      THEO_SHIELD_MACRO_SLOT = slot
+    end
+    if THEO_DUAL_MACRO_SLOT and THEO_SHIELD_MACRO_SLOT then break end
+  end
+end
+
+local function UseSwapMacro(mode)
+  RefreshSwapMacroSlots(false)
+
+  local slot = (mode == "shield") and THEO_SHIELD_MACRO_SLOT or THEO_DUAL_MACRO_SLOT
+  if not slot or not HasAction(slot) then return false end
+
+  local now = GetTime()
+  if (now - THEO_SWAP_LAST_AT) < THEO_SWAP_THROTTLE then return false end
+
+  UseAction(slot) -- fires your named macro from the action bar
+  THEO_SWAP_LAST_AT = now
+  return true
+end
+
+local function IHaveAggroOnTarget()
+  return UnitExists("targettarget") and UnitIsUnit("targettarget", "player")
+end
+
+local function TheoSwapWeaponSetByAggro()
+  -- Only do this in combat (per your request)
+  if not PlayerInCombat() then
+    THEO_LAST_SWAP_MODE = nil
+    return false
+  end
+  if not ValidEnemyTarget() then return false end
+
+  -- If target is attacking me (I have aggro) -> Shield macro, else -> Dual macro
+  local desired = IHaveAggroOnTarget() and "shield" or "dual"
+  if THEO_LAST_SWAP_MODE == desired then return false end
+
+  if UseSwapMacro(desired) then
+    THEO_LAST_SWAP_MODE = desired
+    return true
+  end
+
+  return false
+end
+
+-- =============================
 -- Stances (1.12‑safe via shapeshift API)
 -- =============================
 local function CurrentStance()
@@ -161,12 +248,27 @@ local function CurrentStance()
 end
 
 local function HasBattleStance()    return CurrentStance() == 1 end  -- Warrior order is fixed in 1.12
+local function HasDefensiveStance()       return CurrentStance() == 2 end
 local function HasBerserkerStance() return CurrentStance() == 3 end
 
 local lastStanceSwap = 0
 local function EnsureBerserkerStance()
   if CurrentStance() ~= 3 and (GetTime() - lastStanceSwap) > 0.2 then
     CastSpellByName("Berserker Stance")
+    lastStanceSwap = GetTime()
+  end
+end
+
+local function EnsureDefensiveStance()
+  if CurrentStance() ~= 2 and (GetTime() - lastStanceSwap) > 0.2 then
+    CastSpellByName("Defensive Stance")
+    lastStanceSwap = GetTime()
+  end
+end
+
+local function EnsureBattleStance()
+  if CurrentStance() ~= 1 and (GetTime() - lastStanceSwap) > 0.2 then
+    CastSpellByName("Battle Stance")
     lastStanceSwap = GetTime()
   end
 end
@@ -298,6 +400,131 @@ local function CastSlam()
   local now = GetTime()
   lastGCDAt = now - (GCD_S - GCD_SLAM)
 
+  return true
+end
+
+local function CastIntervene()
+  local ready = IsSpellReady("Intervene")
+  if ready
+     and UnitExists("target")
+     and UnitIsFriend("player", "target")
+     and not UnitIsDead("target")
+     and not UnitIsUnit("target", "player")
+     and GCDReady() then
+
+    CastSpellByName("Intervene")
+    SpellTargetUnit("target")
+    lastGCDAt = GetTime()
+    return true
+  end
+  return false
+end
+
+-- =============================
+-- Revenge proc tracking (block/dodge/parry window)
+-- =============================
+local THEO_REVENGE_TIMEOUT = 5.0
+local TheoRevengeWindowExpires = 0
+
+local TheoRevengeFrame = CreateFrame("Frame")
+TheoRevengeFrame:RegisterEvent("CHAT_MSG_COMBAT_CREATURE_VS_SELF_MISSES")
+TheoRevengeFrame:RegisterEvent("CHAT_MSG_COMBAT_HOSTILEPLAYER_MISSES")
+TheoRevengeFrame:RegisterEvent("CHAT_MSG_COMBAT_CREATURE_VS_SELF_HITS")
+TheoRevengeFrame:RegisterEvent("CHAT_MSG_COMBAT_HOSTILEPLAYER_HITS")
+
+TheoRevengeFrame:SetScript("OnEvent", function()
+  local msg = arg1
+  if not msg then return end
+  msg = string.lower(msg)
+
+  -- Enemy attack vs you resulted in: dodge/parry/block (wording varies slightly)
+  if string.find(msg, "dodge") or string.find(msg, "dodged")
+     or string.find(msg, "parry") or string.find(msg, "parries")
+     or string.find(msg, "block") or string.find(msg, "blocked") then
+    TheoRevengeWindowExpires = GetTime() + THEO_REVENGE_TIMEOUT
+  end
+end)
+
+local function TheoHasRevengeProc()
+  return GetTime() < TheoRevengeWindowExpires
+end
+
+local function CastRevenge()
+  local rage = GetRage()
+  local ready = IsSpellReady("Revenge")
+  if not ready or rage < COST_REVENGE then return false end
+  if not ValidEnemyTarget() or not InTrueMeleeTarget() then return false end
+
+  -- only attempt when we've actually seen a block/dodge/parry recently
+  if not TheoHasRevengeProc() then return false end
+
+  -- caller (/theoprotect) already ensures Defensive; don't stance-dance here
+  if not HasDefensiveStance() then return false end
+  if not GCDReady() then return false end
+
+  CastSpellByName("Revenge")
+  SpellTargetUnit("target")
+  TheoRevengeWindowExpires = 0 -- consume our local proc flag
+  lastGCDAt = GetTime()
+  return true
+end
+
+-- Thunder Clap debuff check (icon only)
+local function TargetHasThunderClapDebuff()
+  for i=1,40 do
+    local tex = UnitDebuff("target", i)
+    if not tex then break end
+    if type(tex)=="string" and string.find(string.lower(tex), "thunderclap") then
+      return true
+    end
+  end
+  return false
+end
+
+local function CastThunderClap()
+  local ready = IsSpellReady("Thunder Clap")
+  if not ready or not ValidEnemyTarget() or not InTrueMeleeTarget() then return false end
+  if not IsSpellUsableNow("Thunder Clap") then return false end
+  if TargetHasThunderClapDebuff() then return false end
+  if not GCDReady() then return false end
+
+  CastSpellByName("Thunder Clap")
+  SpellTargetUnit("target")
+  lastGCDAt = GetTime()
+  return true
+end
+
+local function HasDemoralizingShoutDebuff()
+  if not UnitExists("target") then return false end
+  for i = 1, 40 do
+    local tex = UnitDebuff("target", i)
+    if not tex then break end
+    if type(tex) == "string" then
+      local t = string.lower(tex)
+      -- 1.12 Demo Shout icon is commonly Ability_Warrior_WarCry
+      if string.find(t, "ability_warrior_warcry")
+         or string.find(t, "warcry")
+         or string.find(t, "demoral") then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+local function CastDemoralizingShout()
+  if not GCDReady() then return false end
+
+  local ready = IsSpellReady("Demoralizing Shout")
+  if not ready then return false end
+  if not IsSpellUsableNow("Demoralizing Shout") then return false end
+
+  if not ValidEnemyTarget() or not InTrueMeleeTarget() then return false end
+  if HasDemoralizingShoutDebuff() then return false end
+
+  CastSpellByName("Demoralizing Shout")
+  lastDemoAt = GetTime()
+  lastGCDAt  = GetTime()
   return true
 end
 
@@ -696,6 +923,33 @@ function StampIfRealGCD()
   end
 end
 
+-- Prot variant: HS/Cleave queueing that only reserves rage for BT (ignores WW + execute weave rules)
+local function TryWeaveSwing_Protect(rage, btRem)
+  if not ValidEnemyTarget() or not InTrueMeleeTarget() then return false end
+  if type(st_timer) ~= "number" or st_timer <= 0 then return false end
+
+  local nextMH = st_timer
+  if nextMH <= 0 or nextMH > 10 then return false end
+
+  -- Only queue inside the pre-swing window (unless we're panic-capping rage)
+  if nextMH > SWING_QUEUE_WINDOW and rage < PANIC_RAGE then return false end
+
+  local spellName = useCleave and "Cleave" or "Heroic Strike"
+  local cost      = useCleave and COST_CLEAVE or COST_HS
+
+  -- If BT is imminent (before/around the swing), ensure we can afford BT + queued cost + buffer
+  if btRem <= (nextMH + IMMINENT_BT_WINDOW) then
+    if rage < (COST_BT + cost + HS_BUFFER) then return false end
+  else
+    -- Otherwise, just don't dump below buffer (unless panic rage)
+    if (rage - cost) < HS_BUFFER and rage < PANIC_RAGE then return false end
+  end
+
+  if IsSwingQueued() then return false end
+  CastSpellByName(spellName)
+  return true
+end
+
 -- =============================
 -- Main rotation with Execute gating + swing‑timed weaving + Battle Shout + Sunder
 -- =============================
@@ -929,6 +1183,151 @@ function QuickTheoArms()
 end
 
 -- =============================
+-- Prot rotation: Defensive stance + BT > Revenge > Sunder maintain > HS/Cleave weave > Battle Shout
+-- =============================
+function QuickTheoProtect()
+  -- Confirm any pending Sunder macro actually triggered the GCD before proceeding
+  StampIfRealGCD()
+
+  if not PlayerInCombat() then
+    earlySunderUsed = false
+  end
+
+  if not ValidEnemyTarget() then return end
+
+  -- If we're not in Defensive, swap first and bail (avoid fake-GCD stamping on the same press)
+  if not HasDefensiveStance() then
+    EnsureDefensiveStance()
+    return
+  end
+
+  -- Auto swap Dual/Shield macros based on (approx) aggro
+  TheoSwapWeaponSetByAggro()
+
+  local rage = GetRage()
+  local btReady, btStart, btDur = IsSpellReady("Bloodthirst")
+  local btRem = CDRemaining(btStart, btDur)
+  local execReady = IsSpellReady("Execute")
+  local inExecute = TargetHealthBelow(EXECUTE_PHASE)
+
+  -- 0.x) High-rage HS/Cleave: queue on every press above 90 rage (non-execute)
+  -- Does NOT return so BT/Execute/Revenge can still fire this press.
+  if not inExecute
+     and rage >= 90
+     and ValidEnemyTarget()
+     and InTrueMeleeTarget()
+     and not IsSwingQueued() then
+    local spellName = useCleave and "Cleave" or "Heroic Strike"
+    CastSpellByName(spellName)
+  end
+
+  -- 1) Execute block copied from Fury-style behavior:
+  --    - 10–30 and 60–100 rage: Execute has top priority
+  --    - 30–60 rage: BT if ready, otherwise Execute
+  if inExecute then
+    local inExecLow  = (rage >= EXEC_MIN and rage < 30)  -- 10–30
+    local inExecMid  = (rage >= 30 and rage <= 60)       -- 30–60
+    local inExecHigh = (rage > 60)                       -- 60+
+
+    if (inExecLow or inExecHigh) and execReady and InTrueMeleeTarget() then
+      if CastExecute() then return end
+    end
+
+    if inExecMid then
+      if btReady and rage >= COST_BT and InTrueMeleeTarget() and GCDReady() then
+        if CastBloodthirst() then return end
+      elseif execReady and rage >= EXEC_MIN and InTrueMeleeTarget() then
+        if CastExecute() then return end
+      end
+    end
+
+    -- Fallback inside execute if nothing fired yet: BT > Execute
+    if btReady and rage >= COST_BT and InTrueMeleeTarget() and GCDReady() then
+      if CastBloodthirst() then return end
+    end
+    if execReady and rage >= EXEC_MIN and InTrueMeleeTarget() then
+      if CastExecute() then return end
+    end
+  end
+
+  -- 2) Bloodthirst (normal)
+  if btReady and rage >= COST_BT and InTrueMeleeTarget() and GCDReady() then
+    if CastBloodthirst() then return end
+  end
+
+-- Revenge (proc) — skip in execute; protect an imminent/affordable BT
+do
+  local rageNow = GetRage()
+  local _, btStartR, btDurR = IsSpellReady("Bloodthirst")
+  local btRemR = CDRemaining(btStartR, btDurR)
+
+  local btImminentAndAffordable = (btRemR <= GCD_S) and (rageNow >= COST_BT)
+
+  if not inExecute and not btImminentAndAffordable then
+    if CastRevenge() then return end
+  end
+end
+
+  -- 0.y) Precise swing-timed weave attempt (non-execute) — do NOT return
+  if not inExecute then
+    TryWeaveSwing_Protect(rage, btRem)
+  end
+
+  -- 3.2) Maintain Sunders (Prot: ignore WW gate by passing a huge wwRem)
+  if not inExecute then
+    local _, btStartS, btDurS = IsSpellReady("Bloodthirst")
+    btRem = CDRemaining(btStartS, btDurS)
+
+    -- IMPORTANT: /theoprotect doesn't WW, so wwRem must NOT be "0/ready" here.
+    if MaintainSundersMacro(btRem, 9999) then return end
+  end
+
+  -- 3) Battle Shout upkeep (moved above Revenge so it doesn't get starved)
+  rage = GetRage()
+  local _, btStart2, btDur2 = IsSpellReady("Bloodthirst")
+  btRem = CDRemaining(btStart2, btDur2)
+
+  if not inExecute
+     and PlayerInCombat()
+     and rage >= COST_BS
+     and not HasBattleShout()
+     and (GetTime() - lastBSAt) > 0.7
+     -- don't delay BT if it's ready AND you can afford it
+     and ( (not btReady) or (rage < COST_BT) )
+     and btRem > GCD_S then
+    if CastBattleShout() then return end
+  end
+
+  -- 2.5) Demoralizing Shout (TC-style): only when /theocleave is ON, never in execute, protect BT
+  if not inExecute and useCleave and PlayerInCombat() and (GetTime() - lastDemoAt) > 0.8 then
+    rage = GetRage()
+    local _, btStartD, btDurD = IsSpellReady("Bloodthirst")
+    local btRemNow = CDRemaining(btStartD, btDurD)
+
+    -- If BT is ready (or within next GCD) AND affordable, do NOT spend this GCD on demo.
+    local btImminentAndAffordable = (btRemNow <= GCD_S) and (rage >= COST_BT)
+
+    if rage >= COST_DEMO and (not btImminentAndAffordable) and btRemNow > GCD_S then
+      if CastDemoralizingShout() then return end
+    end
+  end
+
+  -- Thunder Clap (AoE mode only: /theocleave) — protect BT, never in execute
+  if useCleave and not inExecute then
+    rage = GetRage()
+    local _, btStartTC, btDurTC = IsSpellReady("Bloodthirst")
+    local btRemTC = CDRemaining(btStartTC, btDurTC)
+
+    local btImminentAndAffordableTC = (btRemTC <= GCD_S) and (rage >= COST_BT)
+
+    if not btImminentAndAffordableTC then
+      if CastThunderClap() then return end
+    end
+  end
+end
+
+
+-- =============================
 -- TheoCharge helper (two-press opener: OOC Battle Stance → Charge; IC Berserker Stance → Intercept)
 -- =============================
 local function TheoCharge_EnsureStance()
@@ -948,6 +1347,16 @@ local function TheoCharge()
     return
   end
 
+  -- Friendly target: Defensive Stance -> Intervene
+  if UnitIsFriend("player", "target") and not UnitIsDead("target") and not UnitCanAttack("player", "target") then
+    if not HasDefensiveStance() then
+      EnsureDefensiveStance()
+      return
+    end
+    CastIntervene()
+    return
+  end
+
   if UnitAffectingCombat("player") then
     -- In combat: ensure Berserker Stance; next press will Intercept
     if not HasBerserkerStance() then
@@ -963,7 +1372,7 @@ local function TheoCharge()
 
     -- If we're already in Berserker Stance and floating a lot of rage,
     -- just Intercept instead of stance dancing back to Battle for Charge.
-    if HasBerserkerStance() and GetRage() >= 50 then
+    if HasBerserkerStance() and GetRage() >= 35 then
       local ready = IsSpellReady("Intercept")
       if ready then
         CastSpellByName("Intercept")
@@ -1018,11 +1427,10 @@ local THEO_RAID_BUFFS = {
   {"Juju Power"},
   {"Medivh's Merlot", "Merlot"},
   {"Well Fed"},
-  {"Elixir of Fortitude"},
+  {"Health II"},
   {"Elixir of the Mongoose"},
   {"Spirit of Zanza"},
-  {"Elemental Sharpening Stone", "Sharpening Stone"},
-  {"R.O.I.D.S.", "R.O.I.D.S", "ROIDS"},
+  {"Rage of Ages", "Rage"},
 }
 
 SLASH_THEOBUFFS1 = "/theobuffs"
@@ -1116,6 +1524,9 @@ end
 SLASH_QHWARRIOR1 = "/qhtwarrior"
 SlashCmdList["QHWARRIOR"] = QuickTheoWarrior
 
+SLASH_THEOPROTECT1 = "/theoprotect"
+SlashCmdList["THEOPROTECT"] = QuickTheoProtect
+
 -- Slash: stance first, then driver
 SLASH_THEOSTANCE1 = "/theostance"
 SlashCmdList["THEOSTANCE"] = TheoCharge_EnsureStance
@@ -1127,4 +1538,4 @@ SlashCmdList["THEOCHARGE"] = TheoCharge
 SLASH_THEOARMS1 = "/theoarms"
 SlashCmdList["THEOARMS"] = QuickTheoArms
 
-DEFAULT_CHAT_FRAME:AddMessage("QuickTheoWarrior loaded! /qhtwarrior, /theoexec <n>, /theoexecweave 0|1, /theosundermacro <name>, /theocleave, /theostance, /theocharge.", 0.5, 1, 0)
+DEFAULT_CHAT_FRAME:AddMessage("QuickTheoWarrior loaded! /qhtwarrior, /theoprotect, /theoexec <n>, /theoexecweave 0|1, /theosundermacro <name>, /theocleave, /theostance, /theocharge.", 0.5, 1, 0)
