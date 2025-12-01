@@ -1195,20 +1195,22 @@ function QuickTheoProtect()
 
   if not ValidEnemyTarget() then return end
 
-  -- If we're not in Defensive, swap first and bail (avoid fake-GCD stamping on the same press)
-  if not HasDefensiveStance() then
-    EnsureDefensiveStance()
-    return
-  end
+  local inExecute = TargetHealthBelow(EXECUTE_PHASE)
 
-  -- Auto swap Dual/Shield macros based on (approx) aggro
-  TheoSwapWeaponSetByAggro()
+ if inExecute then
+  if EnsureBattleStance() then return end
+else
+  if EnsureDefensiveStance() then return end
+end
+
 
   local rage = GetRage()
   local btReady, btStart, btDur = IsSpellReady("Bloodthirst")
   local btRem = CDRemaining(btStart, btDur)
   local execReady = IsSpellReady("Execute")
-  local inExecute = TargetHealthBelow(EXECUTE_PHASE)
+
+  -- Auto swap Dual/Shield macros based on (approx) aggro
+  -- TheoSwapWeaponSetByAggro()
 
   -- 0.x) High-rage HS/Cleave: queue on every press above 90 rage (non-execute)
   -- Does NOT return so BT/Execute/Revenge can still fire this press.
