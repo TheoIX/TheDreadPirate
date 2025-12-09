@@ -3,7 +3,7 @@
 -- HS/Cleave do NOT consume GCD, so we time them to main‑hand swing using st_timer.
 
 local useCleave = false
-local useOverpower = true  -- /theoop toggles this
+local useOverpower = false  -- /theoop toggles this
 local lastStanceSwap = 0
 local lastGCDAt = 0
 local lastBSAt = 0 -- micro lockout after casting Battle Shout to avoid re-cast during aura scan delay
@@ -72,11 +72,11 @@ local COST_MS = 20            -- Master Strike
 local MS_MIN   = 70           -- need a big rage bank to press MS (adjust via /theoms)
 local THEO_MS_ENABLE = 1      -- 1=enable, 0=disable (toggle via /theomsmode)
 -- Weaving
-local HS_BUFFER = 0          -- keep this much rage beyond the reserve floor when weaving
+local HS_BUFFER = 5          -- keep this much rage beyond the reserve floor when weaving
 local IMMINENT_BT_WINDOW = 1.5  -- treat BT as imminent if ≤ this many seconds
 local IMMINENT_WW_WINDOW = 1.5  -- treat WW as imminent if ≤ this many seconds
-local SWING_QUEUE_WINDOW = 0.45 -- queue HS/Cleave if MH swing is due within this window (seconds)
-local PANIC_RAGE = 85           -- anti‑cap: force weave even if conservative checks fail
+local SWING_QUEUE_WINDOW = 0.65 -- queue HS/Cleave if MH swing is due within this window (seconds)
+local PANIC_RAGE = 70           -- anti‑cap: force weave even if conservative checks fail
 local EXEC_PANIC_RAGE = 60      -- if rage >= this in execute, ignore BT/WW and just Execute
 local WW_ONCD_BT_IMMINENT_BARRIER = 1.5 -- seconds: if BT is closer than this and rage < 30, briefly hold WW
 local EXEC_MIN = 10            -- minimum rage to press Execute (Turtle: Execute dumps remaining rage)
@@ -950,6 +950,137 @@ local function TryWeaveSwing_Protect(rage, btRem)
   return true
 end
 
+-- ============================================================
+-- /theofury: Fury DW rotation WITHOUT Execute and WITHOUT Overpower
+-- Goal: conservative trash rotation (no Execute dumping), otherwise identical feel.
+-- Paste this block:
+--   1) Put the helper TryWeaveSwing_FuryNoExec near your other weaving helpers (after TryWeaveSwing).
+--   2) Put QuickTheoFury() near QuickTheoWarrior() (after it is fine).
+--   3) Add the slash command at the bottom with your other SlashCmdList registrations.
+-- ============================================================
+
+-- 1) Weave helper that DOES NOT disable weaving below 20% (because this rotation never Executes)
+--    This is a copy of TryWeaveSwing() with the execute-phase weaving lock removed.
+local function TryWeaveSwing_FuryNoExec(rage, btRem, wwRem)
+  if not ValidEnemyTarget() or not InTrueMeleeTarget() then return false end
+  if type(st_timer) ~= "number" or st_timer <= 0 then return false end
+
+  local nextMH = st_timer -- seconds until MH swing (from SP_SwingTimer)
+  if nextMH <= 0 or nextMH > 10 then return false end
+
+  -- Only queue inside a narrow pre-swing window (unless we're panic-capping rage)
+  if nextMH > SWING_QUEUE_WINDOW and rage < PANIC_RAGE then return false end
+
+  -- If WW is ready now or extremely soon, don't weave unless we can still afford WW after HS/Cleave
+  local wwNow = IsSpellReady("Whirlwind")
+  if wwNow or wwRem <= 0.2 then
+    local pendingCost = useCleave and COST_CLEAVE or COST_HS
+    if (rage - pendingCost) < (COST_WW + HS_BUFFER) then return false end
+  end
+
+  local floor = RageFloor(btRem, wwRem)
+  local spellName = useCleave and "Cleave" or "Heroic Strike"
+  local cost = useCleave and COST_CLEAVE or COST_HS
+
+  -- If BT will be ready before or right after the swing, be conservative: ensure BT+cost+buffer now
+  if btRem <= (nextMH + IMMINENT_BT_WINDOW) then
+    if rage < (COST_BT + cost + HS_BUFFER) then return false end
+  else
+    -- Otherwise respect floor+buffer after paying cost at swing time
+    if (rage - cost) < (floor + HS_BUFFER) and rage < PANIC_RAGE then return false end
+  end
+
+  -- If we're already queued, do nothing
+  if IsSwingQueued() then return false end
+
+  -- Queue HS/Cleave
+  CastSpellByName(spellName)
+  return true
+end
+
+-- 2) Fury rotation (no Execute, no Overpower)
+function QuickTheoFury()
+  -- Confirm any pending Sunder macro actually triggered the GCD before proceeding
+  StampIfRealGCD()
+
+  if not PlayerInCombat() then
+    earlySunderUsed = false
+  end
+
+  if not ValidEnemyTarget() then return end
+
+  local rage = GetRage()
+  local btReady, btStart, btDur = IsSpellReady("Bloodthirst")
+  local wwReady, wwStart, wwDur = IsSpellReady("Whirlwind")
+  local btRem = CDRemaining(btStart, btDur)
+  local wwRem = CDRemaining(wwStart, wwDur)
+
+  -- Always Berserker stance for this DPS rotation
+  EnsureBerserkerStance()
+
+  -- 0.x) High-rage HS/Cleave: queue on every press above threshold
+  -- Does NOT return so BT/WW can still fire the same press.
+  if rage >= 85
+     and InTrueMeleeTarget()
+     and not IsSwingQueued() then
+    local spellName = useCleave and "Cleave" or "Heroic Strike"
+    CastSpellByName(spellName)
+  end
+
+  -- 1) One early Sunder per combat (your existing helper)
+  if EarlySunderIfMissing() then return end
+
+  -- 2) Bloodthirst on cooldown
+  if btReady and rage >= COST_BT and InTrueMeleeTarget() then
+    if CastBloodthirst() then return end
+  end
+
+  -- 3) Whirlwind when it won't jeopardize BT
+  if wwReady and rage >= COST_WW and InMeleeRange() then
+    local btImminent = (btRem <= GCD_S)
+    if not btImminent then
+      if CastWhirlwind() then return end
+    end
+  end
+
+  -- 4) Battle Shout upkeep – safe window (BT & WW both on cooldown and not imminent)
+  if PlayerInCombat() and rage >= COST_BS and not HasBattleShout() and (GetTime() - lastBSAt) > 0.7 then
+    if (not btReady and not wwReady) and btRem > GCD_S and wwRem > GCD_S then
+      if CastBattleShout() then return end
+    end
+  end
+
+  -- 5) Maintain Sunders with macro in safe windows (macro auto-stops at 5)
+  if MaintainSundersMacro(btRem, wwRem) then return end
+
+  -- 6) Master Strike (rage sink) — only when BT/WW are safely on cooldown and rage is high
+  if THEO_MS_ENABLE == 1 then
+    if (not btReady and not wwReady) and btRem > GCD_S and wwRem > GCD_S then
+      if rage >= MS_MIN then
+        if CastMasterStrike() then return end
+      end
+    end
+  end
+
+  -- 7) Pummel (interrupt) — same safe GCD window as Master Strike
+  if THEO_MS_ENABLE == 1 then
+    if (not btReady and not wwReady) and btRem > GCD_S and wwRem > GCD_S then
+      if rage >= MS_MIN then
+        if CastPummel() then return end
+      end
+    end
+  end
+
+  -- 8) Precise HS/Cleave weaving tied to SP_SwingTimer main-hand swing timing
+  rage = GetRage()
+  local _, btStart2, btDur2 = IsSpellReady("Bloodthirst")
+  local _, wwStart2, wwDur2 = IsSpellReady("Whirlwind")
+  btRem = CDRemaining(btStart2, btDur2)
+  wwRem = CDRemaining(wwStart2, wwDur2)
+
+  if TryWeaveSwing_FuryNoExec(rage, btRem, wwRem) then return end
+end
+
 -- =============================
 -- Main rotation with Execute gating + swing‑timed weaving + Battle Shout + Sunder
 -- =============================
@@ -983,7 +1114,7 @@ if not PlayerInCombat() then
  -- NEW 0.x) High-rage HS/Cleave: queue on every press above 90 rage (non-execute)
   -- This does NOT return, so BT/WW/Execute can still be cast in the same press.
   if not inExecute
-     and rage >= 90
+     and rage >= 85
      and ValidEnemyTarget()
      and InTrueMeleeTarget()
      and not IsSwingQueued() then
@@ -1522,6 +1653,10 @@ SlashCmdList["THEOOP"] = function()
     0.8, 1, 0.6
   )
 end
+
+-- 3) Slash command registration (add near your other SlashCmdList lines)
+SLASH_THEOFURY1 = "/theofury"
+SlashCmdList["THEOFURY"] = QuickTheoFury
 
 SLASH_QHWARRIOR1 = "/qhtwarrior"
 SlashCmdList["QHWARRIOR"] = QuickTheoWarrior
