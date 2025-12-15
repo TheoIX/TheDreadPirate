@@ -2,6 +2,7 @@
 -- Execute gating so BT/WW never slip; precise HS/Cleave weaving using SP_SwingTimer.
 -- HS/Cleave do NOT consume GCD, so we time them to main‑hand swing using st_timer.
 
+local weaponxPVP = false -- /weaponx PvP mode toggle
 local useCleave = false
 local useOverpower = false  -- /theoop toggles this
 local lastStanceSwap = 0
@@ -76,7 +77,7 @@ local HS_BUFFER = 5          -- keep this much rage beyond the reserve floor whe
 local IMMINENT_BT_WINDOW = 1.5  -- treat BT as imminent if ≤ this many seconds
 local IMMINENT_WW_WINDOW = 1.5  -- treat WW as imminent if ≤ this many seconds
 local SWING_QUEUE_WINDOW = 0.65 -- queue HS/Cleave if MH swing is due within this window (seconds)
-local PANIC_RAGE = 70           -- anti‑cap: force weave even if conservative checks fail
+local PANIC_RAGE = 60           -- anti‑cap: force weave even if conservative checks fail
 local EXEC_PANIC_RAGE = 60      -- if rage >= this in execute, ignore BT/WW and just Execute
 local WW_ONCD_BT_IMMINENT_BARRIER = 1.5 -- seconds: if BT is closer than this and rage < 30, briefly hold WW
 local EXEC_MIN = 10            -- minimum rage to press Execute (Turtle: Execute dumps remaining rage)
@@ -161,6 +162,41 @@ end
 
 local function GCDReady()
   return (GetTime() - lastGCDAt) >= GCD_S
+end
+
+-- Returns:
+--   isCasting (bool),
+--   spellName (string or nil),
+--   kind ("cast" or "channel" or nil)
+local function TargetIsCastingSpell()
+  if not UnitExists("target") then
+    return false, nil, nil
+  end
+
+  -- If Turtle/SuperWoW provides these (some clients do), use them first.
+  if type(UnitCastingInfo) == "function" then
+    local spellName = UnitCastingInfo("target")
+    if spellName then
+      return true, spellName, "cast"
+    end
+  end
+
+  if type(UnitChannelInfo) == "function" then
+    local spellName = UnitChannelInfo("target")
+    if spellName then
+      return true, spellName, "channel"
+    end
+  end
+
+  -- Vanilla fallback: rely on the target cast bar being visible.
+  local bar = TargetFrameSpellBar
+  if bar and (bar:IsShown() or bar:IsVisible()) then
+    local spellName = (bar.Text and bar.Text.GetText and bar.Text:GetText()) or nil
+    local kind = bar.channeling and "channel" or "cast"
+    return true, spellName, kind
+  end
+
+  return false, nil, nil
 end
 
 -- =============================
@@ -256,6 +292,7 @@ local function EnsureBerserkerStance()
   if CurrentStance() ~= 3 and (GetTime() - lastStanceSwap) > 0.2 then
     CastSpellByName("Berserker Stance")
     lastStanceSwap = GetTime()
+     lastGCDAt = lastStanceSwap
   end
 end
 
@@ -263,6 +300,7 @@ local function EnsureDefensiveStance()
   if CurrentStance() ~= 2 and (GetTime() - lastStanceSwap) > 0.2 then
     CastSpellByName("Defensive Stance")
     lastStanceSwap = GetTime()
+     lastGCDAt = lastStanceSwap
   end
 end
 
@@ -270,6 +308,7 @@ local function EnsureBattleStance()
   if CurrentStance() ~= 1 and (GetTime() - lastStanceSwap) > 0.2 then
     CastSpellByName("Battle Stance")
     lastStanceSwap = GetTime()
+     lastGCDAt = lastStanceSwap
   end
 end
 
@@ -418,6 +457,38 @@ local function CastIntervene()
     return true
   end
   return false
+end
+
+-- Hamstring debuff check (icon only, 1.12-safe)
+local function TargetHasHamstringDebuff()
+  if not UnitExists("target") then return false end
+  for i = 1, 40 do
+    local tex = UnitDebuff("target", i)
+    if not tex then break end
+    if type(tex) == "string" then
+      local t = string.lower(tex)
+      -- Hamstring icon is commonly Ability_ShockWave in 1.12
+      if string.find(t, "ability_shockwave") or string.find(t, "shockwave") then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+-- Cast helper: Hamstring (rage + range + GCD-safe)
+local function CastHamstring()
+  local COST_HAMSTRING = 10
+  local ready = IsSpellReady("Hamstring")
+  if not ready then return false end
+  if not IsSpellUsableNow("Hamstring") then return false end
+  if GetRage() < COST_HAMSTRING then return false end
+  if not ValidEnemyTarget() or not InTrueMeleeTarget() then return false end
+
+  CastSpellByName("Hamstring")
+  SpellTargetUnit("target")
+  lastGCDAt = GetTime()
+  return true
 end
 
 -- =============================
@@ -756,6 +827,7 @@ local THEO_SUNDER_MACRO_SLOT, THEO_LAST_MACRO_SCAN = nil, 0
 local THEO_SUNDER_MACRO_THROTTLE = 1.0 -- seconds between macro attempts
 local THEO_LAST_SUNDER_MACRO = 0
 local PENDING_GCD_FROM_SUNDER, PENDING_AT, PENDING_RAGE = false, 0, 0
+local PENDING_EARLY_SUNDER = false
 
 -- Simple check for presence of any Sunder debuff (icon only)
 local function HasSunderDebuff()
@@ -804,26 +876,22 @@ end
 local function EarlySunderIfMissing()
   if THEO_EARLY_SUNDER ~= 1 then return false end
 
-  -- Only once per combat
+  -- Only once per combat (but don't burn it until we confirm a real cast)
   if earlySunderUsed then return false end
 
-  -- Only bother once we’ve actually entered combat
-  if not PlayerInCombat() then return false end
+  -- Don't overlap with macro sunder or another pending early sunder
+  if PENDING_GCD_FROM_SUNDER or PENDING_EARLY_SUNDER then return false end
 
   if not ValidEnemyTarget() or not InTrueMeleeTarget() or not GCDReady() then return false end
+  if GetRage() < 10 then return false end
 
-  -- NOTE: removed this so we always add ONE sunder, even if some are already up:
-  -- if HasSunderDebuff() then return false end
-
-  if GetRage() < 10 then return false end -- keep a small floor so we don't zero out on pull
-
+  -- Attempt cast; confirm next press via StampIfRealGCD()
+  PENDING_RAGE = GetRage()
   CastSpellByName("Sunder Armor")
-  SpellTargetUnit("target")
-  lastGCDAt = GetTime()
-  earlySunderUsed = true
+  PENDING_GCD_FROM_SUNDER, PENDING_AT = true, GetTime()
+  PENDING_EARLY_SUNDER = true
   return true
 end
-
 
 -- Maintain via macro in safe BT/WW windows (macro self-stops at 5)
 local function MaintainSundersMacro(btRem, wwRem)
@@ -900,26 +968,38 @@ end
 
 function StampIfRealGCD()
   if not PENDING_GCD_FROM_SUNDER then return end
+
+  local function Confirm(stampTime)
+    lastGCDAt = stampTime
+    PENDING_GCD_FROM_SUNDER = false
+    if PENDING_EARLY_SUNDER then
+      earlySunderUsed = true
+      PENDING_EARLY_SUNDER = false
+    end
+  end
+
   local now = GetTime()
+
   -- Probe shared GCD on nominal 0-CD spells
   local probes = {"Hamstring","Rend","Battle Shout"}
   for _, sp in ipairs(probes) do
     local _, start, dur = IsSpellReady(sp)
     if start and dur and start > 0 and dur >= 1.0 then
-      lastGCDAt = start
-      PENDING_GCD_FROM_SUNDER = false
+      Confirm(start)
       return
     end
   end
+
   -- Backup: rage delta consistent with Sunder cost
   if (PENDING_RAGE - GetRage()) >= 10 then
-    lastGCDAt = now
-    PENDING_GCD_FROM_SUNDER = false
+    Confirm(now)
     return
   end
-  -- If nothing observed within a short window, treat as no-op
-  if (now - PENDING_AT) > 0.35 then
+
+  -- If nothing observed within a short window, treat as no-op (do NOT burn earlySunderUsed)
+  if (now - PENDING_AT) > 0.8 then
     PENDING_GCD_FROM_SUNDER = false
+    PENDING_EARLY_SUNDER = false
   end
 end
 
@@ -1020,7 +1100,7 @@ function QuickTheoFury()
 
   -- 0.x) High-rage HS/Cleave: queue on every press above threshold
   -- Does NOT return so BT/WW can still fire the same press.
-  if rage >= 85
+  if rage >= 70
      and InTrueMeleeTarget()
      and not IsSwingQueued() then
     local spellName = useCleave and "Cleave" or "Heroic Strike"
@@ -1101,12 +1181,15 @@ if not PlayerInCombat() then
   local btRem = CDRemaining(btStart, btDur)
   local wwRem = CDRemaining(wwStart, wwDur)
   local inExecute = TargetHealthBelow(EXECUTE_PHASE)
-
+  
   -- NEW: baked-in Overpower handler.
   -- If this returns true, we either stance-swapped or cast Overpower; skip the rest.
    if TheoOverpower_Rotation(rage, btReady, btRem, wwReady, wwRem, inExecute) then
     return
   end
+
+-- 1.1) One early Sunder if the target has no Sunder yet (no restrictions)
+  if EarlySunderIfMissing() then return end
 
   -- Normal rotation continues in Berserker stance
   EnsureBerserkerStance()
@@ -1114,7 +1197,7 @@ if not PlayerInCombat() then
  -- NEW 0.x) High-rage HS/Cleave: queue on every press above 90 rage (non-execute)
   -- This does NOT return, so BT/WW/Execute can still be cast in the same press.
   if not inExecute
-     and rage >= 85
+     and rage >= 75
      and ValidEnemyTarget()
      and InTrueMeleeTarget()
      and not IsSwingQueued() then
@@ -1123,9 +1206,6 @@ if not PlayerInCombat() then
     CastSpellByName(spellName)
     -- no return here: we still fall through to Sunder/BT/WW logic
   end
-
-  -- 1.1) One early Sunder if the target has no Sunder yet (no restrictions)
-  if EarlySunderIfMissing() then return end
 
   -- 1–3) Core rotation with execute-phase BT/WW rules
   if inExecute then
@@ -1497,9 +1577,12 @@ local function TheoCharge()
       return
     end
     -- We’re in the correct stance; just try Intercept (no range gate here)
-    local ready = IsSpellReady("Intercept")
-    if ready then CastSpellByName("Intercept") end
-    return
+local ready = IsSpellReady("Intercept")
+if ready then
+  CastSpellByName("Intercept")
+  lastGCDAt = GetTime()
+end
+return
   else
     -- Out of combat
 
@@ -1509,6 +1592,7 @@ local function TheoCharge()
       local ready = IsSpellReady("Intercept")
       if ready then
         CastSpellByName("Intercept")
+          lastGCDAt = GetTime()
         return
       end
       -- if Intercept isn't ready, fall through to normal Charge logic
@@ -1517,13 +1601,17 @@ local function TheoCharge()
     -- Default: make sure we're in Battle Stance, then Charge
     if not HasBattleStance() then
       CastSpellByName("Battle Stance")
+      lastGCDAt = GetTime()
       return
     end
 
     -- We’re in the correct stance; just try Charge (no range gate here)
-    local ready = IsSpellReady("Charge")
-    if ready then CastSpellByName("Charge") end
-    return
+local ready = IsSpellReady("Charge")
+if ready then
+  CastSpellByName("Charge")
+  lastGCDAt = GetTime()
+end
+return
   end
 end
 
@@ -1674,5 +1762,14 @@ SlashCmdList["THEOCHARGE"] = TheoCharge
 
 SLASH_THEOARMS1 = "/theoarms"
 SlashCmdList["THEOARMS"] = QuickTheoArms
+
+-- =============================
+-- /weaponx: PvP mode toggle
+-- =============================
+SLASH_WEAPONX1 = "/weaponx"
+SlashCmdList["WEAPONX"] = function()
+  weaponxPVP = not weaponxPVP
+  DEFAULT_CHAT_FRAME:AddMessage("Theo: PvP mode " .. (weaponxPVP and "ON" or "OFF"), 0.8, 1, 0.6)
+end
 
 DEFAULT_CHAT_FRAME:AddMessage("QuickTheoWarrior loaded! /qhtwarrior, /theoprotect, /theoexec <n>, /theoexecweave 0|1, /theosundermacro <name>, /theocleave, /theostance, /theocharge.", 0.5, 1, 0)
