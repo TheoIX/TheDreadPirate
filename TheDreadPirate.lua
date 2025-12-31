@@ -363,7 +363,7 @@ end
 
 local function CastWhirlwind()
   local ready = IsSpellReady("Whirlwind")
-  if ready and ValidEnemyTarget() and InMeleeRange() then
+  if ready and ValidEnemyTarget() and InTrueMeleeTarget() then
     CastSpellByName("Whirlwind")
     SpellTargetUnit("target")
     lastGCDAt = GetTime()
@@ -1116,10 +1116,124 @@ function QuickTheoFury()
   end
 
   -- 3) Whirlwind when it won't jeopardize BT
-  if wwReady and rage >= COST_WW and InMeleeRange() then
+  if wwReady and rage >= COST_WW and InTrueMeleeTarget() then
     local btImminent = (btRem <= GCD_S)
     if not btImminent then
       if CastWhirlwind() then return end
+    end
+  end
+
+  -- 4) Battle Shout upkeep – safe window (BT & WW both on cooldown and not imminent)
+  if PlayerInCombat() and rage >= COST_BS and not HasBattleShout() and (GetTime() - lastBSAt) > 0.7 then
+    if (not btReady and not wwReady) and btRem > GCD_S and wwRem > GCD_S then
+      if CastBattleShout() then return end
+    end
+  end
+
+  -- 5) Maintain Sunders with macro in safe windows (macro auto-stops at 5)
+  if MaintainSundersMacro(btRem, wwRem) then return end
+
+  -- 6) Master Strike (rage sink) — only when BT/WW are safely on cooldown and rage is high
+  if THEO_MS_ENABLE == 1 then
+    if (not btReady and not wwReady) and btRem > GCD_S and wwRem > GCD_S then
+      if rage >= MS_MIN then
+        if CastMasterStrike() then return end
+      end
+    end
+  end
+
+  -- 7) Pummel (interrupt) — same safe GCD window as Master Strike
+  if THEO_MS_ENABLE == 1 then
+    if (not btReady and not wwReady) and btRem > GCD_S and wwRem > GCD_S then
+      if rage >= MS_MIN then
+        if CastPummel() then return end
+      end
+    end
+  end
+
+  -- 8) Precise HS/Cleave weaving tied to SP_SwingTimer main-hand swing timing
+  rage = GetRage()
+  local _, btStart2, btDur2 = IsSpellReady("Bloodthirst")
+  local _, wwStart2, wwDur2 = IsSpellReady("Whirlwind")
+  btRem = CDRemaining(btStart2, btDur2)
+  wwRem = CDRemaining(wwStart2, wwDur2)
+
+  if TryWeaveSwing_FuryNoExec(rage, btRem, wwRem) then return end
+end
+
+-- ============================================================
+-- /theotrash: Trash DW rotation with /theocleave-dependent prio
+--  /theocleave OFF:
+--    - HS queued any time rage >= 42
+--    - BT priority
+--    - WW only if rage >= 60 AND BT is on cooldown (not ready / not imminent)
+--  /theocleave ON:
+--    - Cleave queued any time rage >= 45
+--    - WW priority
+--    - BT locked behind 60 rage (and don't steal a GCD if WW is imminent)
+-- ============================================================
+function quicktheotrash()
+  -- Confirm any pending Sunder macro actually triggered the GCD before proceeding
+  StampIfRealGCD()
+
+  if not PlayerInCombat() then
+    earlySunderUsed = false
+  end
+
+  if not ValidEnemyTarget() then return end
+
+  local rage = GetRage()
+  local btReady, btStart, btDur = IsSpellReady("Bloodthirst")
+  local wwReady, wwStart, wwDur = IsSpellReady("Whirlwind")
+  local btRem = CDRemaining(btStart, btDur)
+  local wwRem = CDRemaining(wwStart, wwDur)
+
+  -- Always Berserker stance for this DPS rotation
+  EnsureBerserkerStance()
+
+  -- 0.x) Keep HS/Cleave queued based on /theocleave toggle
+  -- Does NOT return so BT/WW can still fire the same press.
+  if InTrueMeleeTarget() and not IsSwingQueued() then
+    if useCleave then
+      if rage >= 45 then
+        CastSpellByName("Cleave")
+      end
+    else
+      if rage >= 42 then
+        CastSpellByName("Heroic Strike")
+      end
+    end
+  end
+
+  -- 1) One early Sunder per combat (your existing helper)
+  if EarlySunderIfMissing() then return end
+
+  -- 2–3) BT/WW priority changes based on /theocleave
+  if useCleave then
+    -- /theocleave ON: WW prio
+    if wwReady and rage >= COST_WW and InTrueMeleeTarget() then
+      if CastWhirlwind() then return end
+    end
+
+    -- BT locked behind 60 rage; also don't steal a GCD if WW is about to come up
+    if btReady and rage >= 50 and InTrueMeleeTarget() then
+      local wwImminent = (wwRem <= GCD_S)
+      if not wwImminent then
+        if CastBloodthirst() then return end
+      end
+    end
+  else
+    -- /theocleave OFF: BT prio
+    if btReady and rage >= COST_BT and InTrueMeleeTarget() then
+      if CastBloodthirst() then return end
+    end
+
+    -- WW locked behind 60 rage AND only if BT is on cooldown (not ready / not imminent)
+    if wwReady and rage >= 50 and InTrueMeleeTarget() then
+      local btImminent = (btRem <= GCD_S)
+      if (not btReady) and (not btImminent) then
+        if CastWhirlwind() then return end
+      end
     end
   end
 
@@ -1197,7 +1311,7 @@ if not PlayerInCombat() then
  -- NEW 0.x) High-rage HS/Cleave: queue on every press above 90 rage (non-execute)
   -- This does NOT return, so BT/WW/Execute can still be cast in the same press.
   if not inExecute
-     and rage >= 75
+     and rage >= 70
      and ValidEnemyTarget()
      and InTrueMeleeTarget()
      and not IsSwingQueued() then
@@ -1270,7 +1384,7 @@ if not PlayerInCombat() then
     end
 
     -- 2) Whirlwind when it won't jeopardize BT
-    if wwReady and rage >= COST_WW and InMeleeRange() then
+    if wwReady and rage >= COST_WW and InTrueMeleeTarget() then
       local btImminent = (btRem <= GCD_S)
       if not btImminent then
         if CastWhirlwind() then return end
@@ -1763,6 +1877,9 @@ SlashCmdList["THEOCHARGE"] = TheoCharge
 SLASH_THEOARMS1 = "/theoarms"
 SlashCmdList["THEOARMS"] = QuickTheoArms
 
+SLASH_THEOTRASH1 = "/theotrash"
+SlashCmdList["THEOTRASH"] = quicktheotrash
+ 
 -- =============================
 -- /weaponx: PvP mode toggle
 -- =============================
