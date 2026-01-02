@@ -3,3 +3,4 @@
 ## Notes: Warrior Macros
 ## Author: Theo
 TheDreadPirate.lua
+TheDreadPiratecont.lua
