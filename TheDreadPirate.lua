@@ -1890,3 +1890,52 @@ SlashCmdList["WEAPONX"] = function()
 end
 
 DEFAULT_CHAT_FRAME:AddMessage("QuickTheoWarrior loaded! /qhtwarrior, /theoprotect, /theoexec <n>, /theoexecweave 0|1, /theosundermacro <name>, /theocleave, /theostance, /theocharge.", 0.5, 1, 0)
+
+-- =============================
+-- Exports for split modules (theo2hfury.lua)
+-- Paste near bottom of your MAIN file
+-- =============================
+
+_G.PlayerInCombat         = PlayerInCombat
+_G.ValidEnemyTarget       = ValidEnemyTarget
+_G.EnsureBerserkerStance  = EnsureBerserkerStance
+_G.GetRage                = GetRage
+_G.IsSpellReady           = IsSpellReady
+_G.CDRemaining            = CDRemaining
+_G.TargetHealthBelow      = TargetHealthBelow
+_G.InTrueMeleeTarget      = InTrueMeleeTarget
+_G.GCDReady               = GCDReady
+
+_G.CastSlam               = CastSlam
+_G.CastBloodthirst        = CastBloodthirst
+_G.CastWhirlwind          = CastWhirlwind
+_G.CastExecute            = CastExecute
+
+_G.EarlySunderIfMissing   = EarlySunderIfMissing
+
+_G.TryWeaveSwing_FuryNoExec = TryWeaveSwing_FuryNoExec
+_G.HasBattleShout           = HasBattleShout
+_G.CastBattleShout          = CastBattleShout
+_G.MaintainSundersMacro      = MaintainSundersMacro
+
+_G.TheoArms_UpdateSlamWindow = TheoArms_UpdateSlamWindow
+
+-- constants used by theo2hfury
+_G.COST_BT        = COST_BT
+_G.COST_WW        = COST_WW
+_G.COST_SLAM      = COST_SLAM
+_G.COST_BS        = COST_BS
+_G.EXEC_MIN       = EXEC_MIN
+_G.EXECUTE_PHASE  = EXECUTE_PHASE
+_G.GCD_S          = GCD_S
+_G.SLAM_WINDOW    = SLAM_WINDOW
+
+-- wrappers for local state used by modules
+function Theo_IsCleaveMode()
+  return useCleave
+end
+
+function Theo_InSlamWindow()
+  local now = GetTime()
+  return slamWindowExpires and slamWindowExpires > now
+end
