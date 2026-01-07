@@ -1195,11 +1195,11 @@ function quicktheotrash()
   -- Does NOT return so BT/WW can still fire the same press.
   if InTrueMeleeTarget() and not IsSwingQueued() then
     if useCleave then
-      if rage >= 45 then
+      if rage >= 40 then
         CastSpellByName("Cleave")
       end
     else
-      if rage >= 42 then
+      if rage >= 40 then
         CastSpellByName("Heroic Strike")
       end
     end
@@ -1216,7 +1216,7 @@ function quicktheotrash()
     end
 
     -- BT locked behind 60 rage; also don't steal a GCD if WW is about to come up
-    if btReady and rage >= 50 and InTrueMeleeTarget() then
+    if btReady and rage >= 55 and InTrueMeleeTarget() then
       local wwImminent = (wwRem <= GCD_S)
       if not wwImminent then
         if CastBloodthirst() then return end
@@ -1229,7 +1229,7 @@ function quicktheotrash()
     end
 
     -- WW locked behind 60 rage AND only if BT is on cooldown (not ready / not imminent)
-    if wwReady and rage >= 50 and InTrueMeleeTarget() then
+    if wwReady and rage >= 45 and InTrueMeleeTarget() then
       local btImminent = (btRem <= GCD_S)
       if (not btReady) and (not btImminent) then
         if CastWhirlwind() then return end
@@ -1311,7 +1311,7 @@ if not PlayerInCombat() then
  -- NEW 0.x) High-rage HS/Cleave: queue on every press above 90 rage (non-execute)
   -- This does NOT return, so BT/WW/Execute can still be cast in the same press.
   if not inExecute
-     and rage >= 70
+     and rage >= 55
      and ValidEnemyTarget()
      and InTrueMeleeTarget()
      and not IsSwingQueued() then
@@ -1852,6 +1852,16 @@ SlashCmdList["THEOOP"] = function()
 
   DEFAULT_CHAT_FRAME:AddMessage(
     "Theo: Overpower usage "..(useOverpower and "ENABLED (stance-dancing for Overpower when safe)." or "DISABLED."),
+    0.8, 1, 0.6
+  )
+end
+
+-- Toggle ONLY the Sunder maintenance (macro) on/off
+SLASH_THEOSUNDERMAINT1 = "/theosundermaint"
+SlashCmdList["THEOSUNDERMAINT"] = function()
+  THEO_SUNDER_MAINTAIN = (THEO_SUNDER_MAINTAIN == 1) and 0 or 1
+  DEFAULT_CHAT_FRAME:AddMessage(
+    "Theo: Sunder maintenance " .. ((THEO_SUNDER_MAINTAIN == 1) and "ON" or "OFF"),
     0.8, 1, 0.6
   )
 end
