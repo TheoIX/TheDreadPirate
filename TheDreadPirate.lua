@@ -86,7 +86,7 @@ local earlySunderUsed = false
 local COST_MORTAL_STRIKE = 30   -- Arms Mortal Strike cost / threshold gating
 local COST_SLAM          = 15   -- Slam base cost
 local SLAM_WINDOW        = 0.40 -- seconds after a white swing where we’re allowed to start a Slam
-local COST_TC = 20            -- Thunder Clap
+local COST_TC = 50            -- Thunder Clap
 local COST_DEMO = 10  -- Demoralizing Shout
 
 -- =============================
@@ -1311,7 +1311,7 @@ if not PlayerInCombat() then
  -- NEW 0.x) High-rage HS/Cleave: queue on every press above 90 rage (non-execute)
   -- This does NOT return, so BT/WW/Execute can still be cast in the same press.
   if not inExecute
-     and rage >= 55
+     and rage >= 60
      and ValidEnemyTarget()
      and InTrueMeleeTarget()
      and not IsSwingQueued() then
@@ -1508,7 +1508,8 @@ function QuickTheoArms()
 end
 
 -- =============================
--- Prot rotation: Defensive stance + BT > Revenge > Sunder maintain > HS/Cleave weave > Battle Shout
+-- Prot rotation (NO Execute logic)
+-- Always Defensive Stance: BT > Revenge > Sunder maintain > HS/Cleave weave > Battle Shout
 -- =============================
 function QuickTheoProtect()
   -- Confirm any pending Sunder macro actually triggered the GCD before proceeding
@@ -1520,27 +1521,19 @@ function QuickTheoProtect()
 
   if not ValidEnemyTarget() then return end
 
-  local inExecute = TargetHealthBelow(EXECUTE_PHASE)
-
- if inExecute then
-  if EnsureBattleStance() then return end
-else
-  if EnsureDefensiveStance() then return end
-end
-
+  -- Always stay in Defensive Stance (no execute-phase stance swap)
+  EnsureDefensiveStance()
 
   local rage = GetRage()
   local btReady, btStart, btDur = IsSpellReady("Bloodthirst")
   local btRem = CDRemaining(btStart, btDur)
-  local execReady = IsSpellReady("Execute")
 
   -- Auto swap Dual/Shield macros based on (approx) aggro
   -- TheoSwapWeaponSetByAggro()
 
-  -- 0.x) High-rage HS/Cleave: queue on every press above 90 rage (non-execute)
-  -- Does NOT return so BT/Execute/Revenge can still fire this press.
-  if not inExecute
-     and rage >= 90
+  -- 0.x) High-rage HS/Cleave: queue on every press above 90 rage
+  -- Does NOT return so BT/Revenge can still fire this press.
+  if rage >= 90
      and ValidEnemyTarget()
      and InTrueMeleeTarget()
      and not IsSwingQueued() then
@@ -1548,90 +1541,56 @@ end
     CastSpellByName(spellName)
   end
 
-  -- 1) Execute block copied from Fury-style behavior:
-  --    - 10–30 and 60–100 rage: Execute has top priority
-  --    - 30–60 rage: BT if ready, otherwise Execute
-  if inExecute then
-    local inExecLow  = (rage >= EXEC_MIN and rage < 30)  -- 10–30
-    local inExecMid  = (rage >= 30 and rage <= 60)       -- 30–60
-    local inExecHigh = (rage > 60)                       -- 60+
-
-    if (inExecLow or inExecHigh) and execReady and InTrueMeleeTarget() then
-      if CastExecute() then return end
-    end
-
-    if inExecMid then
-      if btReady and rage >= COST_BT and InTrueMeleeTarget() and GCDReady() then
-        if CastBloodthirst() then return end
-      elseif execReady and rage >= EXEC_MIN and InTrueMeleeTarget() then
-        if CastExecute() then return end
-      end
-    end
-
-    -- Fallback inside execute if nothing fired yet: BT > Execute
-    if btReady and rage >= COST_BT and InTrueMeleeTarget() and GCDReady() then
-      if CastBloodthirst() then return end
-    end
-    if execReady and rage >= EXEC_MIN and InTrueMeleeTarget() then
-      if CastExecute() then return end
-    end
-  end
-
-  -- 2) Bloodthirst (normal)
+  -- 1) Bloodthirst (normal)
   if btReady and rage >= COST_BT and InTrueMeleeTarget() and GCDReady() then
     if CastBloodthirst() then return end
   end
 
--- Revenge (proc) — skip in execute; protect an imminent/affordable BT
-do
-  local rageNow = GetRage()
-  local _, btStartR, btDurR = IsSpellReady("Bloodthirst")
-  local btRemR = CDRemaining(btStartR, btDurR)
+  -- 2) Revenge (proc) — protect an imminent/affordable BT
+  do
+    local rageNow = GetRage()
+    local _, btStartR, btDurR = IsSpellReady("Bloodthirst")
+    local btRemR = CDRemaining(btStartR, btDurR)
 
-  local btImminentAndAffordable = (btRemR <= GCD_S) and (rageNow >= COST_BT)
+    local btImminentAndAffordable = (btRemR <= GCD_S) and (rageNow >= COST_BT)
 
-  if not inExecute and not btImminentAndAffordable then
-    if CastRevenge() then return end
-  end
-end
-
-  -- 0.y) Precise swing-timed weave attempt (non-execute) — do NOT return
-  if not inExecute then
-    TryWeaveSwing_Protect(rage, btRem)
+    if not btImminentAndAffordable then
+      if CastRevenge() then return end
+    end
   end
 
-  -- 3.2) Maintain Sunders (Prot: ignore WW gate by passing a huge wwRem)
-  if not inExecute then
+  -- 3) Precise swing-timed HS/Cleave weave attempt (does NOT return)
+  TryWeaveSwing_Protect(rage, btRem)
+
+  -- 4) Maintain Sunders (Prot: ignore WW gate by passing a huge wwRem)
+  do
     local _, btStartS, btDurS = IsSpellReady("Bloodthirst")
-    btRem = CDRemaining(btStartS, btDurS)
+    local btRemS = CDRemaining(btStartS, btDurS)
 
     -- IMPORTANT: /theoprotect doesn't WW, so wwRem must NOT be "0/ready" here.
-    if MaintainSundersMacro(btRem, 9999) then return end
+    if MaintainSundersMacro(btRemS, 9999) then return end
   end
 
-  -- 3) Battle Shout upkeep (moved above Revenge so it doesn't get starved)
+  -- 5) Battle Shout upkeep (don’t delay BT if it’s ready AND you can afford it)
   rage = GetRage()
   local _, btStart2, btDur2 = IsSpellReady("Bloodthirst")
   btRem = CDRemaining(btStart2, btDur2)
 
-  if not inExecute
-     and PlayerInCombat()
+  if PlayerInCombat()
      and rage >= COST_BS
      and not HasBattleShout()
      and (GetTime() - lastBSAt) > 0.7
-     -- don't delay BT if it's ready AND you can afford it
      and ( (not btReady) or (rage < COST_BT) )
      and btRem > GCD_S then
     if CastBattleShout() then return end
   end
 
-  -- 2.5) Demoralizing Shout (TC-style): only when /theocleave is ON, never in execute, protect BT
-  if not inExecute and useCleave and PlayerInCombat() and (GetTime() - lastDemoAt) > 0.8 then
+  -- 6) Demoralizing Shout (AoE mode only: /theocleave) — protect BT
+  if useCleave and PlayerInCombat() and (GetTime() - lastDemoAt) > 0.8 then
     rage = GetRage()
     local _, btStartD, btDurD = IsSpellReady("Bloodthirst")
     local btRemNow = CDRemaining(btStartD, btDurD)
 
-    -- If BT is ready (or within next GCD) AND affordable, do NOT spend this GCD on demo.
     local btImminentAndAffordable = (btRemNow <= GCD_S) and (rage >= COST_BT)
 
     if rage >= COST_DEMO and (not btImminentAndAffordable) and btRemNow > GCD_S then
@@ -1639,8 +1598,8 @@ end
     end
   end
 
-  -- Thunder Clap (AoE mode only: /theocleave) — protect BT, never in execute
-  if useCleave and not inExecute then
+  -- 7) Thunder Clap (AoE mode only: /theocleave) — protect BT
+  if useCleave then
     rage = GetRage()
     local _, btStartTC, btDurTC = IsSpellReady("Bloodthirst")
     local btRemTC = CDRemaining(btStartTC, btDurTC)
@@ -1652,7 +1611,6 @@ end
     end
   end
 end
-
 
 -- =============================
 -- TheoCharge helper (two-press opener: OOC Battle Stance → Charge; IC Berserker Stance → Intercept)
