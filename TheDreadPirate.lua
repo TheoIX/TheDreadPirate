@@ -671,7 +671,7 @@ end
 -- Uses real dodge-based window + no Overpower in Execute phase.
 -- Once Battle Stance is triggered for OP, it’s OP-or-nothing for a few presses.
 -- =============================
-local function TheoOverpower_Rotation(rage, btReady, btRem, wwReady, wwRem, inExecute)
+local function TheoOverpower_Rotation(rage, btReady, btRem, inExecute)
   -- If the toggle is OFF, clear stale state and bail
   if not useOverpower then
     TheoOPPending = false
@@ -750,7 +750,7 @@ local function TheoOverpower_Rotation(rage, btReady, btRem, wwReady, wwRem, inEx
 
     -- We got here: in Battle Stance, window flag set, but something blocked cast
     -- (range/facing/window ended between checks). Try again next press.
-    TheoOPTries = TheoOPTries - 1
+    TheoOPTries = TheoOPTries - 0
     if TheoOPTries <= 0 then
       TheoOPPending = false
       TheoOPTries   = 0
@@ -780,7 +780,7 @@ local function TheoOverpower_Rotation(rage, btReady, btRem, wwReady, wwRem, inEx
   -- • Rage between 5 and 24
   -- • BT + WW both NOT ready
   if rage >= 30 or rage < 5 then return false end
-  if btReady or wwReady then return false end
+  if btReady then return false end
   if not ValidEnemyTarget() or not InTrueMeleeTarget() then return false end
 
   -- If we're already in Battle Stance, just slam Overpower (after respecting GCD) and be done.
