@@ -61,10 +61,10 @@ local GCD_S = 1.5            -- global cooldown seconds
 local GCD_SLAM = 1.0         -- Slam triggers only a 1.0s GCD with talent
 local EXECUTE_PHASE = 20     -- sub‑20% HP
 local COST_BT = 30
-local COST_WW = 25
+local COST_WW = 20
 local COST_EXEC = 10           -- Improved Execute talented (5 rage base); still dumps remaining rage
 local COST_CLEAVE = 20
-local COST_HS = 12
+local COST_HS = 7
 local COST_BS = 10            -- Battle Shout
 local COST_REVENGE = 5
 -- Costs / thresholds
@@ -841,6 +841,18 @@ local function HasSunderDebuff()
   return false
 end
 
+-- If aDF (Armor Debuff Finder) is installed, use it to read exact Sunder stacks.
+-- Returns: number (0..5+) OR nil if aDF isn't available.
+local function GetSunderStacksFromADF()
+  if not aDF or type(aDF.GetDebuff) ~= "function" then return nil end
+  if not aDFSpells or not aDFSpells["Sunder Armor"] then return nil end
+
+  -- aDF:GetDebuff(unit, spellTextOrList, wantStacks)
+  local stacks = aDF:GetDebuff("target", aDFSpells["Sunder Armor"], 1)
+  if type(stacks) == "number" then return stacks end
+  return nil
+end
+
 -- Find/cached macro slot by name
 local function RefreshSunderMacroSlot(force)
   local now = GetTime()
@@ -861,6 +873,11 @@ local function UseSunderMacro()
   local slot = RefreshSunderMacroSlot(false)
   if not slot or not HasAction(slot) then return false end
   local now = GetTime()
+  -- HARD STOP: if aDF detects 5+ stacks, do not press the Sunder macro at all.
+  local adfStacks = GetSunderStacksFromADF()
+  if adfStacks and adfStacks >= 5 then
+    return false
+  end
   -- Do not spam the macro and do not overlap while awaiting confirmation
   if (now - THEO_LAST_SUNDER_MACRO) < THEO_SUNDER_MACRO_THROTTLE or PENDING_GCD_FROM_SUNDER then
     return false
@@ -883,7 +900,12 @@ local function EarlySunderIfMissing()
   if PENDING_GCD_FROM_SUNDER or PENDING_EARLY_SUNDER then return false end
 
   if not ValidEnemyTarget() or not InTrueMeleeTarget() or not GCDReady() then return false end
-  if GetRage() < 10 then return false end
+  if GetRage() < 5 then return false end
+ 
+   local adfStacks = GetSunderStacksFromADF()
+  if adfStacks and adfStacks >= 5 then
+    return false
+  end
 
   -- Attempt cast; confirm next press via StampIfRealGCD()
   PENDING_RAGE = GetRage()
@@ -1350,7 +1372,7 @@ if not PlayerInCombat() then
     -- Rage bands for execute-phase behavior
     local inExecLow  = (rage >= EXEC_MIN and rage < 30)  -- 10–30
     local inExecMid  = (rage >= 30 and rage <= 60)       -- 30–60 window
-    local inExecHigh = (rage > 1)                       -- 60–100+
+    local inExecHigh = (rage > 60)                       -- 60–100+
 
     -- A) 10–30 and 60–100 rage: Execute has top priority
     if (inExecLow or inExecHigh) and execReady and InTrueMeleeTarget() then
@@ -1931,3 +1953,4 @@ function Theo_InSlamWindow()
   local now = GetTime()
   return slamWindowExpires and slamWindowExpires > now
 end
+
