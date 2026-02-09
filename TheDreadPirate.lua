@@ -1836,6 +1836,17 @@ SlashCmdList["THEOEXECWEAVE"] = function(msg)
   end
 end
 
+-- =========================================================
+-- Exports for TheoWarriorIcons.lua (reads local toggle state)
+-- =========================================================
+function Theo_GetUseCleave()
+  return useCleave and true or false
+end
+
+function Theo_GetSunderMaintain()
+  return (THEO_SUNDER_MAINTAIN == 1) and 1 or 0
+end
+
 -- NEW: Cleave toggle – /theocleave flips between Cleave (20 rage) and HS (12 rage)
 SLASH_THEOCLEAVE1 = "/theocleave"
 SlashCmdList["THEOCLEAVE"] = function()
@@ -1844,7 +1855,9 @@ SlashCmdList["THEOCLEAVE"] = function()
     "Theo: Cleave mode "..(useCleave and "ENABLED (using Cleave, cost 20)." or "DISABLED (using Heroic Strike, cost 12)."),
     0.8, 1, 0.6
   )
+  if TheoUI_UpdateIcons then TheoUI_UpdateIcons() end
 end
+
 
 -- Master Strike + Pummel toggle – /theomsmode flips both on/off
 SLASH_THEOMSMODE1 = "/theomsmode"
@@ -1886,7 +1899,9 @@ SlashCmdList["THEOSUNDERMAINT"] = function()
     "Theo: Sunder maintenance " .. ((THEO_SUNDER_MAINTAIN == 1) and "ON" or "OFF"),
     0.8, 1, 0.6
   )
+  if TheoUI_UpdateIcons then TheoUI_UpdateIcons() end
 end
+
 
 -- 3) Slash command registration (add near your other SlashCmdList lines)
 SLASH_THEOFURY1 = "/theofury"
