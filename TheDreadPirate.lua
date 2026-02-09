@@ -13,7 +13,7 @@ local lastDemoAt = 0 -- micro lockout after casting Demo Shout (debuff scan dela
 local TheoOPPending = false      -- we have committed to an OP sequence (next press = OP)
 local TheoOPExpires = 0          -- safety timeout for that pending sequence
 local THEO_OP_TIMEOUT = 5.0      -- seconds to keep a pending Overpower window alive
-local TheoOPTries = 0            -- how many times we’ll try to fire OP in Battle before giving up
+local TheoOPTries = 5            -- how many times we’ll try to fire OP in Battle before giving up
 
 local THEO_OP_ICD = 7.0          -- internal cooldown between successful Overpowers (seconds)
 local TheoLastOPAt = 0           -- last time we successfully cast Overpower
@@ -86,7 +86,7 @@ local earlySunderUsed = false
 local COST_MORTAL_STRIKE = 30   -- Arms Mortal Strike cost / threshold gating
 local COST_SLAM          = 15   -- Slam base cost
 local SLAM_WINDOW        = 0.40 -- seconds after a white swing where we’re allowed to start a Slam
-local COST_TC = 50            -- Thunder Clap
+local COST_TC = 16            -- Thunder Clap
 local COST_DEMO = 10  -- Demoralizing Shout
 
 -- =============================
@@ -415,6 +415,24 @@ local function CastPummel()
   return false
 end
 
+local function CastShieldBash()
+  if not GCDReady() then return false end
+
+  local rage = GetRage()
+  if rage < 10 then return false end
+
+  local ready = IsSpellReady("Shield Bash")
+  if not ready then return false end
+  if not IsSpellUsableNow("Shield Bash") then return false end
+
+  if not ValidEnemyTarget() or not InTrueMeleeTarget() then return false end
+
+  CastSpellByName("Shield Bash")
+  SpellTargetUnit("target")
+  lastGCDAt = GetTime()
+  return true
+end
+
 local function CastMortalStrike()
   local ready = IsSpellReady("Mortal Strike")
   if ready and ValidEnemyTarget() and InTrueMeleeTarget() then
@@ -552,11 +570,11 @@ local function TargetHasThunderClapDebuff()
   return false
 end
 
-local function CastThunderClap()
+local function CastThunderClap(ignoreDebuff)
   local ready = IsSpellReady("Thunder Clap")
   if not ready or not ValidEnemyTarget() or not InTrueMeleeTarget() then return false end
   if not IsSpellUsableNow("Thunder Clap") then return false end
-  if TargetHasThunderClapDebuff() then return false end
+  if (not ignoreDebuff) and TargetHasThunderClapDebuff() then return false end
   if not GCDReady() then return false end
 
   CastSpellByName("Thunder Clap")
@@ -779,7 +797,7 @@ local function TheoOverpower_Rotation(rage, btReady, btRem, inExecute)
   -- Start conditions (only checked BEFORE we commit):
   -- • Rage between 5 and 24
   -- • BT + WW both NOT ready
-  if rage >= 30 or rage < 5 then return false end
+  if rage >= 35 or rage < 5 then return false end
   if btReady then return false end
   if not ValidEnemyTarget() or not InTrueMeleeTarget() then return false end
 
@@ -1943,6 +1961,18 @@ _G.EXEC_MIN       = EXEC_MIN
 _G.EXECUTE_PHASE  = EXECUTE_PHASE
 _G.GCD_S          = GCD_S
 _G.SLAM_WINDOW    = SLAM_WINDOW
+_G.EnsureDefensiveStance  = EnsureDefensiveStance
+_G.TargetIsCastingSpell   = TargetIsCastingSpell
+_G.CastRevenge            = CastRevenge
+_G.CastThunderClap        = CastThunderClap
+_G.CastDemoralizingShout  = CastDemoralizingShout
+_G.UseSunderMacro         = UseSunderMacro
+_G.TryWeaveSwing_Protect  = TryWeaveSwing_Protect
+_G.IsSwingQueued          = IsSwingQueued
+_G.IsSpellUsableNow       = IsSpellUsableNow
+_G.CastShieldBash = CastShieldBash
+_G.COST_TC   = COST_TC
+_G.COST_DEMO = COST_DEMO
 
 -- wrappers for local state used by modules
 function Theo_IsCleaveMode()
@@ -1953,4 +1983,3 @@ function Theo_InSlamWindow()
   local now = GetTime()
   return slamWindowExpires and slamWindowExpires > now
 end
-
