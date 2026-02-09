@@ -197,5 +197,69 @@ end
   end
 end
 
+function QuickTheoFarm()
+  -- Confirm any pending Sunder macro actually triggered the GCD before proceeding
+  StampIfRealGCD()
+
+  if not PlayerInCombat() then
+    earlySunderUsed = false
+  end
+
+  if not ValidEnemyTarget() then return end
+
+  -- Always stay in Defensive Stance
+  EnsureDefensiveStance()
+
+  local rage = GetRage()
+
+  -- 1) Shield Bash interrupt at TOP priority
+  local isCasting = TargetIsCastingSpell()
+  if isCasting then
+    if CastShieldBash() then return end
+  end
+
+  -- 2) Keep HS/Cleave queued anytime over 35 rage (does not consume GCD)
+if rage > 35 and ValidEnemyTarget() and InTrueMeleeTarget() and not IsSwingQueued() then
+  local cleaveMode = (type(Theo_IsCleaveMode) == "function" and Theo_IsCleaveMode()) or false
+  CastSpellByName(cleaveMode and "Cleave" or "Heroic Strike")
+  -- do NOT return; allow GCD abilities on the same press
+end
+
+
+  -- 3) Revenge
+  if CastRevenge() then return end
+
+  -- 4) Thunder Clap
+  rage = GetRage()
+  if rage >= COST_TC then
+    if CastThunderClap(true) then return end
+  end
+
+  -- 5) Battle Shout upkeep
+  rage = GetRage()
+  if rage >= COST_BS then
+    if CastBattleShout() then return end
+  end
+
+  -- 6) Demoralizing Shout if missing
+  rage = GetRage()
+  if rage >= COST_DEMO then
+    if CastDemoralizingShout() then return end
+  end
+
+  -- 7) Sunder Armor lowest priority (uses your ADF-aware macro plumbing)
+  rage = GetRage()
+  if rage >= 15 and GCDReady() and InTrueMeleeTarget() then
+    if UseSunderMacro() then return end
+  end
+
+  -- 8) Regular HS/Cleave weaver at the very bottom
+  rage = GetRage()
+  if TryWeaveSwing_Protect(rage, 9999) then return end
+end
+
+SLASH_THEOFARM1 = "/theofarm"
+SlashCmdList["THEOFARM"] = QuickTheoFarm
+
 SLASH_THEO2HFURY1 = "/theo2hfury"
 SlashCmdList["THEO2HFURY"] = QuickTheo2HFury
