@@ -2,5 +2,8 @@
 ## Title: TheDreadPirate
 ## Notes: Warrior Macros
 ## Author: Theo
+## SavedVariables: TheoWarriorIconDB
+
 TheDreadPirate.lua
 TheDreadPiratecont.lua
+TheoWarriorIcons.lua
