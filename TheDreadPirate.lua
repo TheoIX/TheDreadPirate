@@ -1,7 +1,7 @@
 -- QuickTheoWarrior.lua – Rage‑smart DPS (Classic/Turtle 1.12)
 -- Execute gating so BT/WW never slip; precise HS/Cleave weaving using SP_SwingTimer.
 -- HS/Cleave do NOT consume GCD, so we time them to main‑hand swing using st_timer.
-
+local warthogMode = false -- /warthog toggles this
 local weaponxPVP = false -- /weaponx PvP mode toggle
 local useCleave = false
 local useOverpower = false  -- /theoop toggles this
@@ -90,6 +90,90 @@ local COST_TC = 16            -- Thunder Clap
 local COST_DEMO = 10  -- Demoralizing Shout
 
 -- =============================
+-- Raid buff checker (/theobuffs)
+-- =============================
+local TheoBuffTip = CreateFrame("GameTooltip", "TheoBuffTip", UIParent, "GameTooltipTemplate")
+TheoBuffTip:SetOwner(UIParent, "ANCHOR_NONE")
+
+local function Theo_PlayerHasBuff(patterns)
+  if type(patterns) == "string" then patterns = {patterns} end
+
+  for i = 1, 40 do
+    TheoBuffTip:ClearLines()
+    TheoBuffTip:SetUnitBuff("player", i)
+
+    local t1 = _G["TheoBuffTipTextLeft1"]
+    local name = t1 and t1:GetText()
+    if not name then break end
+
+    local nl = string.lower(name)
+    for _, p in ipairs(patterns) do
+      if p and p ~= "" and string.find(nl, string.lower(p), 1, true) then
+        return true
+      end
+    end
+  end
+
+  return false
+end
+
+local THEO_RAID_BUFFS = {
+  {"Winterfall Firewater"},
+  {"Juju Power"},
+  {"Medivh's Merlot", "Merlot"},
+  {"Well Fed"},
+  {"Health II"},
+  {"Elixir of the Mongoose"},
+  {"Spirit of Zanza"},
+  {"Rage of Ages", "Rage"},
+}
+
+SLASH_THEOBUFFS1 = "/theobuffs"
+SlashCmdList["THEOBUFFS"] = function()
+  local missing = {}
+
+  for _, entry in ipairs(THEO_RAID_BUFFS) do
+    local label = entry[1]
+    if not Theo_PlayerHasBuff(entry) then
+      table.insert(missing, label)
+    end
+  end
+
+  if table.getn(missing) == 0 then
+    DEFAULT_CHAT_FRAME:AddMessage("Theo: Buff check OK (all listed raid buffs found).", 0.5, 1, 0.5)
+  else
+    DEFAULT_CHAT_FRAME:AddMessage("Theo: Missing buffs -> " .. table.concat(missing, ", "), 1, 0.5, 0.5)
+  end
+end
+
+local TheoDebuffTip = CreateFrame("GameTooltip", "TheoDebuffTip", UIParent, "GameTooltipTemplate")
+TheoDebuffTip:SetOwner(UIParent, "ANCHOR_NONE")
+
+local function Theo_PlayerHasDebuff(patterns)
+  if type(patterns) == "string" then
+    patterns = {patterns}
+  end
+
+  for i = 1, 16 do
+    TheoDebuffTip:ClearLines()
+    TheoDebuffTip:SetUnitDebuff("player", i)
+
+    local t1 = _G["TheoDebuffTipTextLeft1"]
+    local name = t1 and t1:GetText()
+    if not name then break end
+
+    local nl = string.lower(name)
+    for _, p in ipairs(patterns) do
+      if p and p ~= "" and string.find(nl, string.lower(p), 1, true) then
+        return true
+      end
+    end
+  end
+
+  return false
+end
+
+-- =============================
 -- Utilities
 -- =============================
 -- Match Theomode‑style signature: (ready, start, duration)
@@ -154,6 +238,12 @@ local function InTrueMeleeTarget()
   return CheckInteractDistance("target", 2)
 end
 
+local function TargetHealthAbove(p)
+  if not UnitExists("target") then return false end
+  local hp = (UnitHealth("target") / math.max(1, UnitHealthMax("target"))) * 100
+  return hp > p
+end
+
 local function TargetHealthBelow(p)
   if not UnitExists("target") then return false end
   local hp = (UnitHealth("target") / math.max(1, UnitHealthMax("target"))) * 100
@@ -197,6 +287,34 @@ local function TargetIsCastingSpell()
   end
 
   return false, nil, nil
+end
+
+local function Theo_IsBossLikeTarget()
+  if not UnitExists("target") then return false end
+
+  local class = UnitClassification("target")
+  if class == "worldboss" or class == "boss" then
+    return true
+  end
+
+  -- Some 1.12/Turtle units may present boss mobs oddly; level -1 is still a good fallback.
+  local lvl = UnitLevel("target")
+  if lvl == -1 then
+    return true
+  end
+
+  return false
+end
+
+local function CastBloodrage()
+  local ready = IsSpellReady("Bloodrage")
+  if not ready then return false end
+  if not PlayerInCombat() then return false end
+  if not ValidEnemyTarget() then return false end
+  if not InTrueMeleeTarget() then return false end
+
+  CastSpellByName("Bloodrage")
+  return true
 end
 
 -- =============================
@@ -287,7 +405,6 @@ local function HasBattleStance()    return CurrentStance() == 1 end  -- Warrior 
 local function HasDefensiveStance()       return CurrentStance() == 2 end
 local function HasBerserkerStance() return CurrentStance() == 3 end
 
-local lastStanceSwap = 0
 local function EnsureBerserkerStance()
   if CurrentStance() ~= 3 and (GetTime() - lastStanceSwap) > 0.2 then
     CastSpellByName("Berserker Stance")
@@ -494,18 +611,27 @@ local function TargetHasHamstringDebuff()
   return false
 end
 
--- Cast helper: Hamstring (rage + range + GCD-safe)
 local function CastHamstring()
   local COST_HAMSTRING = 10
   local ready = IsSpellReady("Hamstring")
   if not ready then return false end
   if not IsSpellUsableNow("Hamstring") then return false end
+  if not GCDReady() then return false end   -- <--- ADD THIS
   if GetRage() < COST_HAMSTRING then return false end
   if not ValidEnemyTarget() or not InTrueMeleeTarget() then return false end
 
   CastSpellByName("Hamstring")
   SpellTargetUnit("target")
   lastGCDAt = GetTime()
+  return true
+end
+
+local function CastPerception()
+  local ready = IsSpellReady("Perception")
+  if not ready then return false end
+  if not ValidEnemyTarget() then return false end
+
+  CastSpellByName("Perception")
   return true
 end
 
@@ -954,6 +1080,195 @@ SlashCmdList["THEOSUNDERMAC"] = function(msg)
   end
 end
 
+local function Theo_FindBagItemByName(itemName)
+  local needle = string.lower(itemName or "")
+  for bag = 0, 4 do
+    local slots = GetContainerNumSlots(bag) or 0
+    for slot = 1, slots do
+      local link = GetContainerItemLink(bag, slot)
+      if link and string.find(string.lower(link), needle, 1, true) then
+        return bag, slot
+      end
+    end
+  end
+  return nil, nil
+end
+
+local function Theo_CanUseBagItemByName(itemName)
+  local bag, slot = Theo_FindBagItemByName(itemName)
+  if not bag then return false end
+
+  local start, duration, enable = GetContainerItemCooldown(bag, slot)
+  if enable ~= 1 then return false end
+  if start and duration and start > 0 and duration > 0 then return false end
+
+  return bag, slot
+end
+
+local function Theo_UseBagItemByName(itemName)
+  local bag, slot = Theo_CanUseBagItemByName(itemName)
+  if not bag then return false end
+
+  UseContainerItem(bag, slot)
+  return true
+end
+
+local function Theo_UseWarthogQuicknessPotion()
+  if not warthogMode then return false end
+  if not PlayerInCombat() then return false end
+  if not ValidEnemyTarget() then return false end
+  if not InTrueMeleeTarget() then return false end
+  if not Theo_IsBossLikeTarget() then return false end
+
+  -- Use tooltip-name buff detection, since this file already supports that well.
+  if not Theo_PlayerHasDebuff("Death Wish") then return false end
+  -- Optional anti-waste: don't try again if the haste potion buff is already active.
+  if Theo_PlayerHasBuff({"Potion of Quickness", "Quickness"}) then return false end
+
+  return Theo_UseBagItemByName("Potion of Quickness")
+end
+
+local function Theo_UseWarthogJujuFlurry()
+  if not warthogMode then return false end
+  if not PlayerInCombat() then return false end
+  if not ValidEnemyTarget() then return false end
+  if not InTrueMeleeTarget() then return false end
+  if not Theo_IsBossLikeTarget() then return false end
+
+  -- No Death Wish requirement for Juju Flurry.
+  -- Optional anti-waste: don't re-use if buff already active.
+  if Theo_PlayerHasBuff({"Juju Flurry", "Flurry"}) then return false end
+
+  return Theo_UseBagItemByName("Juju Flurry")
+end
+
+local function Theo_HasDeathWishBuff()
+  for i = 1, 40 do
+    local tex = UnitBuff("player", i)
+    if not tex then break end
+    if type(tex) == "string" then
+      local t = string.lower(tex)
+      if string.find(t, "deathwish")
+         or string.find(t, "ability_whirlwind")
+         or string.find(t, "spell_shadow_deathpact") then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+local function Theo_SlotHasWarthogTrinket(slot)
+  local link = GetInventoryItemLink("player", slot)
+  if not link then return false end
+
+  local s = string.lower(link)
+  return string.find(s, "earthstrike", 1, true)
+      or string.find(s, "molten emberstone", 1, true)
+end
+
+local function Theo_CanUseWarthogTrinket(slot)
+  if not Theo_SlotHasWarthogTrinket(slot) then return false end
+
+  local start, duration, enable = GetInventoryItemCooldown("player", slot)
+  if enable ~= 1 then return false end
+  if start and duration and start > 0 and duration > 0 then return false end
+
+  return true
+end
+
+local function Theo_UseWarthogTrinkets()
+  if not warthogMode then return false end
+  if not PlayerInCombat() then return false end
+  if not ValidEnemyTarget() then return false end
+  if not InTrueMeleeTarget() then return false end
+
+  local bossLike = Theo_IsBossLikeTarget()
+  local hasDW = Theo_PlayerHasDebuff("Death Wish")
+
+  for slot = 13, 14 do
+    if Theo_CanUseWarthogTrinket(slot) then
+      if not bossLike then
+        UseInventoryItem(slot)
+        return true
+      end
+
+      if hasDW then
+        UseInventoryItem(slot)
+        return true
+      end
+    end
+  end
+
+  return false
+end
+
+local function Theo_UseWarthog()
+  if not warthogMode then return false end
+  if not ValidEnemyTarget() then return false end
+
+  local inMelee = InTrueMeleeTarget()
+
+  -- =========================================================
+  -- 1) Perception
+  -- =========================================================
+  local percReady = IsSpellReady("Perception")
+  if percReady then
+    if not inMelee then
+      return CastPerception()
+    end
+
+    local btReady = IsSpellReady("Bloodthirst")
+    local wwReady = IsSpellReady("Whirlwind")
+
+    if inMelee and (not btReady) and (not wwReady) and TargetHealthAbove(20) then
+      return CastPerception()
+    end
+  end
+
+  -- =========================================================
+  -- 2) Bloodrage
+  -- =========================================================
+  if inMelee and PlayerInCombat() then
+    local bossLike = Theo_IsBossLikeTarget()
+
+    if not bossLike then
+      if CastBloodrage() then
+        return true
+      end
+    else
+      if TargetHealthBelow(20) then
+        if CastBloodrage() then
+          return true
+        end
+      end
+    end
+  end
+
+  -- =========================================================
+  -- 3) Warthog trinkets
+  -- =========================================================
+  if Theo_UseWarthogTrinkets() then
+    return true
+  end
+
+  -- =========================================================
+  -- 4) Boss quickness potion
+  -- =========================================================
+  if Theo_UseWarthogQuicknessPotion() then
+    return true
+  end
+
+  -- =========================================================
+  -- 5) Boss juju flurry
+  -- =========================================================
+  if Theo_UseWarthogJujuFlurry() then
+    return true
+  end
+
+  return false
+end
+
 -- =============================
 -- Rage floor & weaving using SP_SwingTimer (main‑hand swing timing)
 -- =============================
@@ -1252,6 +1567,10 @@ function quicktheotrash()
   local btRem = CDRemaining(btStart, btDur)
   local wwRem = CDRemaining(wwStart, wwDur)
 
+  if Theo_UseWarthog() then
+    return
+  end
+
   -- Always Berserker stance for this DPS rotation
   EnsureBerserkerStance()
 
@@ -1359,19 +1678,17 @@ if not PlayerInCombat() then
   local btRem = CDRemaining(btStart, btDur)
   local wwRem = CDRemaining(wwStart, wwDur)
   local inExecute = TargetHealthBelow(EXECUTE_PHASE)
-  
-  -- NEW: baked-in Overpower handler.
-  -- If this returns true, we either stance-swapped or cast Overpower; skip the rest.
-   if TheoOverpower_Rotation(rage, btReady, btRem, wwReady, wwRem, inExecute) then
-    return
-  end
 
 -- 1.1) One early Sunder if the target has no Sunder yet (no restrictions)
   if EarlySunderIfMissing() then return end
 
+if Theo_UseWarthog() then
+    return
+  end
+
   -- Normal rotation continues in Berserker stance
   EnsureBerserkerStance()
- 
+
  -- NEW 0.x) High-rage HS/Cleave: queue on every press above 90 rage (non-execute)
   -- This does NOT return, so BT/WW/Execute can still be cast in the same press.
   if not inExecute
@@ -1388,9 +1705,9 @@ if not PlayerInCombat() then
   -- 1–3) Core rotation with execute-phase BT/WW rules
   if inExecute then
     -- Rage bands for execute-phase behavior
-    local inExecLow  = (rage >= EXEC_MIN and rage < 30)  -- 10–30
+    local inExecLow  = (rage >= EXEC_MIN and rage < 99)  -- 10–30
     local inExecMid  = (rage >= 30 and rage <= 60)       -- 30–60 window
-    local inExecHigh = (rage > 60)                       -- 60–100+
+    local inExecHigh = (rage > 1)                       -- 60–100+
 
     -- A) 10–30 and 60–100 rage: Execute has top priority
     if (inExecLow or inExecHigh) and execReady and InTrueMeleeTarget() then
@@ -1485,6 +1802,16 @@ if not PlayerInCombat() then
     end
   end
 end
+
+  -- 3.9) Hamstring — same safe GCD window as Master Strike/Pummel
+  -- Only applied if the target doesn't already have the Hamstring debuff.
+  if THEO_MS_ENABLE == 1 and not inExecute then
+    if (not btReady and not wwReady) and btRem > GCD_S and wwRem > GCD_S then
+      if rage >= MS_MIN then
+        if CastHamstring() then return end
+        end
+      end
+    end
 
   -- 4) Precise HS/Cleave weaving tied to SP_SwingTimer main‑hand swing (no GCD)
      rage = GetRage()
@@ -1751,62 +2078,6 @@ return
   end
 end
 
--- =============================
--- Raid buff checker (/theobuffs)
--- =============================
-local TheoBuffTip = CreateFrame("GameTooltip", "TheoBuffTip", UIParent, "GameTooltipTemplate")
-TheoBuffTip:SetOwner(UIParent, "ANCHOR_NONE")
-
-local function Theo_PlayerHasBuff(patterns)
-  if type(patterns) == "string" then patterns = {patterns} end
-
-  for i = 1, 40 do
-    TheoBuffTip:ClearLines()
-    TheoBuffTip:SetUnitBuff("player", i)
-
-    local t1 = _G["TheoBuffTipTextLeft1"]
-    local name = t1 and t1:GetText()
-    if not name then break end
-
-    local nl = string.lower(name)
-    for _, p in ipairs(patterns) do
-      if p and p ~= "" and string.find(nl, string.lower(p), 1, true) then
-        return true
-      end
-    end
-  end
-
-  return false
-end
-
-local THEO_RAID_BUFFS = {
-  {"Winterfall Firewater"},
-  {"Juju Power"},
-  {"Medivh's Merlot", "Merlot"},
-  {"Well Fed"},
-  {"Health II"},
-  {"Elixir of the Mongoose"},
-  {"Spirit of Zanza"},
-  {"Rage of Ages", "Rage"},
-}
-
-SLASH_THEOBUFFS1 = "/theobuffs"
-SlashCmdList["THEOBUFFS"] = function()
-  local missing = {}
-
-  for _, entry in ipairs(THEO_RAID_BUFFS) do
-    local label = entry[1]
-    if not Theo_PlayerHasBuff(entry) then
-      table.insert(missing, label)
-    end
-  end
-
-  if table.getn(missing) == 0 then
-    DEFAULT_CHAT_FRAME:AddMessage("Theo: Buff check OK (all listed raid buffs found).", 0.5, 1, 0.5)
-  else
-    DEFAULT_CHAT_FRAME:AddMessage("Theo: Missing buffs -> " .. table.concat(missing, ", "), 1, 0.5, 0.5)
-  end
-end
 
 -- =============================
 -- Slash commands
@@ -1902,6 +2173,14 @@ SlashCmdList["THEOSUNDERMAINT"] = function()
   if TheoUI_UpdateIcons then TheoUI_UpdateIcons() end
 end
 
+SLASH_WARTHOG1 = "/warthog"
+SlashCmdList["WARTHOG"] = function()
+  warthogMode = not warthogMode
+  DEFAULT_CHAT_FRAME:AddMessage(
+    "Theo: Warthog mode " .. (warthogMode and "ON" or "OFF"),
+    0.8, 1, 0.6
+  )
+end
 
 -- 3) Slash command registration (add near your other SlashCmdList lines)
 SLASH_THEOFURY1 = "/theofury"
