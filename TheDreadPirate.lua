@@ -2046,19 +2046,19 @@ end
 -- =============================
 -- TheoCharge helper (two-press opener: OOC Battle Stance → Charge; IC Berserker Stance → Intercept)
 -- =============================
-local function TheoCharge_EnsureStance()
-  if not HasBattleStance() then
-    CastSpellByName("Battle Stance")
-  end
-end
-
 local function TheoCharge()
   if not UnitExists("target") then
-    -- Optional: still prep stance with no target
-    if not UnitAffectingCombat("player") and not HasBattleStance() then
-      CastSpellByName("Battle Stance")
-    elseif UnitAffectingCombat("player") and not HasBerserkerStance() then
-      CastSpellByName("Berserker Stance")
+    -- Optional prep only if the corresponding gap-closer is actually ready
+    if UnitAffectingCombat("player") then
+      local interceptReady = IsSpellReady("Intercept")
+      if interceptReady and not HasBerserkerStance() then
+        CastSpellByName("Berserker Stance")
+      end
+    else
+      local chargeReady = IsSpellReady("Charge")
+      if chargeReady and not HasBattleStance() then
+        CastSpellByName("Battle Stance")
+      end
     end
     return
   end
@@ -2074,47 +2074,44 @@ local function TheoCharge()
   end
 
   if UnitAffectingCombat("player") then
-    -- In combat: ensure Berserker Stance; next press will Intercept
+    -- Optional symmetry fix: don't stance swap unless Intercept is ready
+    local interceptReady = IsSpellReady("Intercept")
+    if not interceptReady then return end
+
     if not HasBerserkerStance() then
       CastSpellByName("Berserker Stance")
       return
     end
-    -- We’re in the correct stance; just try Intercept (no range gate here)
-local ready = IsSpellReady("Intercept")
-if ready then
-  CastSpellByName("Intercept")
-  lastGCDAt = GetTime()
-end
-return
+
+    CastSpellByName("Intercept")
+    lastGCDAt = GetTime()
+    return
   else
     -- Out of combat
 
-    -- If we're already in Berserker Stance and floating a lot of rage,
-    -- just Intercept instead of stance dancing back to Battle for Charge.
+    -- Stay in Berserker and Intercept if already there and it is actually ready
     if HasBerserkerStance() and GetRage() >= 35 then
-      local ready = IsSpellReady("Intercept")
-      if ready then
+      local interceptReady = IsSpellReady("Intercept")
+      if interceptReady then
         CastSpellByName("Intercept")
-          lastGCDAt = GetTime()
+        lastGCDAt = GetTime()
         return
       end
-      -- if Intercept isn't ready, fall through to normal Charge logic
     end
 
-    -- Default: make sure we're in Battle Stance, then Charge
+    -- Key fix: only go Battle if Charge is actually ready
+    local chargeReady = IsSpellReady("Charge")
+    if not chargeReady then return end
+
     if not HasBattleStance() then
       CastSpellByName("Battle Stance")
       lastGCDAt = GetTime()
       return
     end
 
-    -- We’re in the correct stance; just try Charge (no range gate here)
-local ready = IsSpellReady("Charge")
-if ready then
-  CastSpellByName("Charge")
-  lastGCDAt = GetTime()
-end
-return
+    CastSpellByName("Charge")
+    lastGCDAt = GetTime()
+    return
   end
 end
 
