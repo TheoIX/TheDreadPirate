@@ -63,7 +63,7 @@ local EXECUTE_PHASE = 20     -- sub‑20% HP
 local COST_BT = 30
 local COST_WW = 20
 local COST_EXEC = 10           -- Improved Execute talented (5 rage base); still dumps remaining rage
-local COST_CLEAVE = 20
+local COST_CLEAVE = 17
 local COST_HS = 7
 local COST_BS = 10            -- Battle Shout
 local COST_REVENGE = 5
@@ -122,8 +122,10 @@ local THEO_RAID_BUFFS = {
   {"Juju Power"},
   {"Medivh's Merlot", "Merlot"},
   {"Well Fed"},
+  {"Concoction of the Emerald Mongoose"},
+  {"Concoction of the Arcane Giant"},
   {"Health II"},
-  {"Elixir of the Mongoose"},
+  {"Greater Agility"},
   {"Spirit of Zanza"},
   {"Rage of Ages", "Rage"},
 }
@@ -968,7 +970,7 @@ local THEO_SUNDER_MACRO_NAME = "Sunder5"  -- name of your SuperCleveroid macro
 
 local THEO_SUNDER_MACRO_SLOT, THEO_LAST_MACRO_SCAN = nil, 0
 -- Throttle and pending-GCD confirmation for Sunder macro
-local THEO_SUNDER_MACRO_THROTTLE = 1.0 -- seconds between macro attempts
+local THEO_SUNDER_MACRO_THROTTLE = 0.4 -- seconds between macro attempts
 local THEO_LAST_SUNDER_MACRO = 0
 local PENDING_GCD_FROM_SUNDER, PENDING_AT, PENDING_RAGE = false, 0, 0
 local PENDING_EARLY_SUNDER = false
@@ -1080,6 +1082,29 @@ SlashCmdList["THEOSUNDERMAC"] = function(msg)
   end
 end
 
+local THEO_WARTHOG_ITEM_THROTTLE = 0.25
+local theoLastWarthogItemTry = 0
+
+local function Theo_WarthogItemThrottleReady()
+  return (GetTime() - theoLastWarthogItemTry) >= THEO_WARTHOG_ITEM_THROTTLE
+end
+
+local function Theo_WarthogStampItemTry()
+  theoLastWarthogItemTry = GetTime()
+end
+
+local function Theo_IsInventorySlotNowOnCooldown(slot)
+  local start, duration, enable = GetInventoryItemCooldown("player", slot)
+  if enable ~= 1 then return false end
+  return (start and duration and start > 0 and duration > 0)
+end
+
+local function Theo_IsBagSlotNowOnCooldown(bag, slot)
+  local start, duration, enable = GetContainerItemCooldown(bag, slot)
+  if enable ~= 1 then return false end
+  return (start and duration and start > 0 and duration > 0)
+end
+
 local function Theo_FindBagItemByName(itemName)
   local needle = string.lower(itemName or "")
   for bag = 0, 4 do
@@ -1108,9 +1133,16 @@ end
 local function Theo_UseBagItemByName(itemName)
   local bag, slot = Theo_CanUseBagItemByName(itemName)
   if not bag then return false end
+  if not Theo_WarthogItemThrottleReady() then return false end
 
+  Theo_WarthogStampItemTry()
   UseContainerItem(bag, slot)
-  return true
+
+  if Theo_IsBagSlotNowOnCooldown(bag, slot) then
+    return true
+  end
+
+  return false
 end
 
 local function Theo_UseWarthogQuicknessPotion()
@@ -1122,9 +1154,7 @@ local function Theo_UseWarthogQuicknessPotion()
 
   -- Use tooltip-name buff detection, since this file already supports that well.
   if not Theo_PlayerHasDebuff("Death Wish") then return false end
-  -- Optional anti-waste: don't try again if the haste potion buff is already active.
-  if Theo_PlayerHasBuff({"Potion of Quickness", "Quickness"}) then return false end
-
+ 
   return Theo_UseBagItemByName("Potion of Quickness")
 end
 
@@ -1137,7 +1167,7 @@ local function Theo_UseWarthogJujuFlurry()
 
   -- No Death Wish requirement for Juju Flurry.
   -- Optional anti-waste: don't re-use if buff already active.
-  if Theo_PlayerHasBuff({"Juju Flurry", "Flurry"}) then return false end
+  if Theo_PlayerHasBuff("Juju Flurry") then return false end
 
   return Theo_UseBagItemByName("Juju Flurry")
 end
@@ -1189,13 +1219,23 @@ local function Theo_UseWarthogTrinkets()
   for slot = 13, 14 do
     if Theo_CanUseWarthogTrinket(slot) then
       if not bossLike then
+        if not Theo_WarthogItemThrottleReady() then return false end
+        Theo_WarthogStampItemTry()
         UseInventoryItem(slot)
-        return true
+
+        if Theo_IsInventorySlotNowOnCooldown(slot) then
+          return true
+        end
       end
 
       if hasDW then
+        if not Theo_WarthogItemThrottleReady() then return false end
+        Theo_WarthogStampItemTry()
         UseInventoryItem(slot)
-        return true
+
+        if Theo_IsInventorySlotNowOnCooldown(slot) then
+          return true
+        end
       end
     end
   end
