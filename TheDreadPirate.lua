@@ -122,10 +122,8 @@ local THEO_RAID_BUFFS = {
   {"Juju Power"},
   {"Medivh's Merlot", "Merlot"},
   {"Well Fed"},
-  {"Concoction of the Emerald Mongoose"},
-  {"Concoction of the Arcane Giant"},
+  {"Elixir of the Mongoose"},
   {"Health II"},
-  {"Greater Agility"},
   {"Spirit of Zanza"},
   {"Rage of Ages", "Rage"},
 }
@@ -1194,6 +1192,7 @@ local function Theo_SlotHasWarthogTrinket(slot)
 
   local s = string.lower(link)
   return string.find(s, "earthstrike", 1, true)
+      or string.find(s, "kiss of the spider", 1, true)
       or string.find(s, "molten emberstone", 1, true)
 end
 
@@ -1732,7 +1731,7 @@ if Theo_UseWarthog() then
  -- NEW 0.x) High-rage HS/Cleave: queue on every press above 90 rage (non-execute)
   -- This does NOT return, so BT/WW/Execute can still be cast in the same press.
   if not inExecute
-     and rage >= 55
+     and rage >= 35
      and ValidEnemyTarget()
      and InTrueMeleeTarget()
      and not IsSwingQueued() then
